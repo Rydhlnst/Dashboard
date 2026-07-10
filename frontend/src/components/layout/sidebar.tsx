@@ -25,6 +25,8 @@ import {
   DollarSign,
   AlertTriangle,
   UserCircle,
+  DatabaseZap,
+  PieChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AuthUser } from "@/types/user";
@@ -64,6 +66,7 @@ const navGroups: NavGroup[] = [
     label: "Analitik",
     items: [
       { href: "/dashboard/analytics", label: "Chart Builder", icon: TrendingUp },
+      { href: "/dashboard/charts", label: "Dynamic Charts", icon: PieChart, adminOnly: true },
       { href: "/dashboard/location", label: "Peta Lokasi", icon: MapPin },
       { href: "/dashboard/acceptance", label: "Acceptance", icon: ClipboardCheck },
       { href: "/dashboard/financial", label: "Financial", icon: DollarSign },
@@ -74,6 +77,7 @@ const navGroups: NavGroup[] = [
     label: "Data",
     items: [
       { href: "/dashboard/data", label: "Detail Data", icon: Table2 },
+      { href: "/dashboard/datasets", label: "Dynamic Datasets", icon: DatabaseZap, adminOnly: true },
       { href: "/dashboard/import", label: "Import Data", icon: Upload, adminOnly: true },
       { href: "/dashboard/manual-input", label: "Input Manual", icon: PenLine, adminOnly: true },
       { href: "/dashboard/manage-columns", label: "Manage Columns", icon: Columns3, adminOnly: true },

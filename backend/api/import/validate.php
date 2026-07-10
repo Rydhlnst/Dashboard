@@ -2,24 +2,17 @@
 /**
  * POST /api/import/validate.php
  *
- * Applies column mapping, cleans data, and validates every staging row
- * for a given batch. Returns a summary — no data enters project_records.
+ * Type-based validation for the dynamic import pipeline.
+ * No column mapping step needed — mapping was done at upload time.
  *
- * Body: {
- *   batch_id: int,
- *   column_actions: {
- *     "<col_letter>": { action: "create"|"map"|"ignore", field_key: string }
- *   }
- * }
+ * Body: { batch_id: int }
  */
 
 require_once __DIR__ . '/../../config/cors.php';
 require_once __DIR__ . '/../../config/database.php';
 require_once __DIR__ . '/../../middleware/requireAdmin.php';
 require_once __DIR__ . '/../../helpers/response.php';
-require_once __DIR__ . '/../../helpers/column_map.php';
-require_once __DIR__ . '/../../helpers/data_cleaner.php';
-require_once __DIR__ . '/../../helpers/validator.php';
+require_once __DIR__ . '/../../helpers/schema_builder.php';
 require_once __DIR__ . '/../../models/AuditLog.php';
 
 header('Content-Type: application/json; charset=utf-8');
@@ -31,109 +24,126 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $admin = requireAdmin();
 $body  = getRequestBody();
 
-$batchId    = (int)($body['batch_id'] ?? 0);
-$colActions = (array)($body['column_actions'] ?? []);  // {colLetter: {action, field_key}}
-
+$batchId = (int)($body['batch_id'] ?? 0);
 if ($batchId <= 0) jsonError('batch_id is required.', 400);
 
 try {
     set_time_limit(300);
     $db = getDB();
 
-    // ── Load batch ────────────────────────────────────────────────────────
-    $batch = $db->prepare("SELECT * FROM import_batches WHERE id=? LIMIT 1");
-    $batch->execute([$batchId]);
-    $batch = $batch->fetch(PDO::FETCH_ASSOC);
+    // ── Load batch ────────────────────────────────────────────────────────────
+    $bStmt = $db->prepare(
+        "SELECT ib.*, d.columns_schema, d.table_name, d.primary_key_col
+           FROM import_batches ib
+           LEFT JOIN datasets d ON d.id = ib.dataset_id
+          WHERE ib.id = ? LIMIT 1"
+    );
+    $bStmt->execute([$batchId]);
+    $batch = $bStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$batch) jsonError("Batch #{$batchId} not found.", 404);
     if (!in_array($batch['batch_status'], ['pending_validation','validated'], true)) {
         jsonError("Batch status '{$batch['batch_status']}' cannot be validated.", 409);
     }
-
-    $datasetType    = $batch['dataset_type'];
-    $columnMap      = json_decode($batch['column_map'] ?? '{}', true);       // {header: db_col}
-    $unknownColumns = json_decode($batch['unknown_columns'] ?? '{}', true);  // {colLetter: {header, field_key, ...}}
-
-    // ── Apply user column_actions to build final header→field_key map ─────
-    foreach ($colActions as $colLetter => $action) {
-        if (!isset($unknownColumns[$colLetter])) continue;
-        $header = $unknownColumns[$colLetter]['header'];
-
-        if (in_array($action['action'] ?? '', ['create','map'], true)) {
-            $fieldKey = $action['field_key'] ?? $unknownColumns[$colLetter]['field_key'];
-            if ($fieldKey) $columnMap[$header] = $fieldKey;
-
-            // Auto-create column_definition for "create" action
-            if (($action['action'] ?? '') === 'create') {
-                $stmt = $db->prepare(
-                    "SELECT id FROM column_definitions WHERE field_key=? AND dataset_type IN ('all',?) LIMIT 1"
-                );
-                $stmt->execute([$fieldKey, $datasetType]);
-                if (!$stmt->fetch()) {
-                    $db->prepare(
-                        "INSERT INTO column_definitions
-                           (dataset_type, field_key, label, field_type, is_system, is_visible, sort_order, created_at, updated_at)
-                         VALUES (?, ?, ?, 'text', 0, 1, 999, NOW(), NOW())"
-                    )->execute([$datasetType, $fieldKey, $header]);
-                    AuditLog::log(
-                        $admin['id'], 'auto_create_column', 'column_definition', null,
-                        "Auto-created dynamic column '{$fieldKey}' (label: {$header}) for dataset {$datasetType}"
-                    );
-                }
-            }
-        }
-        // 'ignore': header not added to columnMap → values silently dropped
+    if (empty($batch['dataset_id'])) {
+        jsonError("Batch #{$batchId} has no linked dataset. Use the legacy validate endpoint.", 409);
     }
 
-    // ── Load existing PDIDs in DB for duplicate detection ─────────────────
-    $dbPdids = loadDbPdids($db, $datasetType);
+    // ── Build type map from columns_schema ────────────────────────────────────
+    $schema  = json_decode($batch['columns_schema'] ?? '[]', true) ?? [];
+    $typeMap = [];      // col_name => col_type
+    foreach ($schema as $col) {
+        $typeMap[$col['col_name']] = $col['col_type'];
+    }
 
-    // ── Process all pending staging rows ──────────────────────────────────
+    $primaryKeyCol = $batch['primary_key_col'] ?? null;
+    $tableName     = $batch['table_name']      ?? null;
+
+    // ── Load existing primary-key values from ds_* table (for dedup) ─────────
+    $dbPkValues = [];
+    if ($primaryKeyCol && $tableName) {
+        $safePk = sanitizeColName($primaryKeyCol);
+        $pkStmt = $db->query("SELECT UPPER(`{$safePk}`) AS pk FROM `{$tableName}`");
+        while ($pkRow = $pkStmt->fetch(PDO::FETCH_ASSOC)) {
+            if ($pkRow['pk'] !== null) $dbPkValues[strtoupper((string)$pkRow['pk'])] = true;
+        }
+    }
+
+    // ── Process all staging rows ──────────────────────────────────────────────
     $stagingStmt = $db->prepare(
         "SELECT id, `row_number`, raw_data FROM import_staging WHERE batch_id=? ORDER BY `row_number` ASC"
     );
     $stagingStmt->execute([$batchId]);
 
-    $counts     = ['valid' => 0, 'warning' => 0, 'error' => 0];
-    $batchPdids = [];   // track PDIDs within this batch
-
-    // Prepare update statement (reused per row)
     $updateStmt = $db->prepare(
         "UPDATE import_staging
             SET mapped_data=?, cleaned_data=?, status=?, validation_errors=?, validation_warnings=?
           WHERE id=?"
     );
 
-    while ($row = $stagingStmt->fetch(PDO::FETCH_ASSOC)) {
-        $rawData = json_decode($row['raw_data'], true) ?? [];
+    $counts      = ['valid' => 0, 'warning' => 0, 'error' => 0];
+    $batchPkSeen = [];   // track PK values within this batch
 
-        // Apply column map → {field_key: raw_value}
-        $mappedData = [];
-        foreach ($rawData as $header => $rawVal) {
-            $fieldKey = $columnMap[$header] ?? null;
-            if ($fieldKey !== null) {
-                $mappedData[$fieldKey] = (string)$rawVal;
+    while ($row = $stagingStmt->fetch(PDO::FETCH_ASSOC)) {
+        $rawData  = json_decode($row['raw_data'] ?? '{}', true) ?? [];
+        $cleaned  = [];
+        $errors   = [];
+        $warnings = [];
+
+        // ── Clean every column by its inferred type ───────────────────────
+        foreach ($rawData as $colName => $rawVal) {
+            $colType = $typeMap[$colName] ?? 'VARCHAR(255)';
+            [$cleanedVal, $colWarns, $colErrors] = cleanValueByType((string)$rawVal, $colType);
+            $cleaned[$colName] = $cleanedVal;
+            foreach ($colWarns   as $msg) $warnings[] = ['field' => $colName, 'message' => $msg];
+            foreach ($colErrors  as $msg) $errors[]   = ['field' => $colName, 'message' => $msg];
+        }
+
+        // ── Primary key duplicate detection ───────────────────────────────
+        // $primaryKeyCol is stored as the raw user input (e.g. "PDID").
+        // Cleaned data keys are sanitised col_names (e.g. "pdid").
+        // Must use sanitizeColName() to match the correct key.
+        if ($primaryKeyCol) {
+            $safePkName = sanitizeColName($primaryKeyCol);
+            if (isset($cleaned[$safePkName])) {
+                $pkVal = strtoupper((string)($cleaned[$safePkName] ?? ''));
+                if ($pkVal !== '') {
+                    if (isset($batchPkSeen[$pkVal])) {
+                        $errors[] = [
+                            'field'   => $safePkName,
+                            'message' => "Duplicate key '{$cleaned[$safePkName]}' within this file — only the first occurrence will be imported.",
+                        ];
+                    } else {
+                        $batchPkSeen[$pkVal] = true;
+                        if (isset($dbPkValues[$pkVal])) {
+                            $warnings[] = [
+                                'field'   => $safePkName,
+                                'message' => "Key '{$cleaned[$safePkName]}' already exists — record will be updated.",
+                            ];
+                        }
+                    }
+                }
             }
         }
 
-        // Validate + clean
-        [$cleanedData, $status, $errors, $warnings] = validateRow(
-            $mappedData, $datasetType, $batchPdids, $dbPdids
-        );
+        // ── Determine row status ──────────────────────────────────────────
+        if (!empty($errors))        $status = 'error';
+        elseif (!empty($warnings))  $status = 'warning';
+        else                        $status = 'valid';
 
         $counts[$status] = ($counts[$status] ?? 0) + 1;
 
         $updateStmt->execute([
-            json_encode($mappedData,   JSON_UNESCAPED_UNICODE),
-            json_encode($cleanedData,  JSON_UNESCAPED_UNICODE),
+            json_encode($rawData,   JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+            json_encode($cleaned,   JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
             $status,
-            json_encode($errors,       JSON_UNESCAPED_UNICODE),
-            json_encode($warnings,     JSON_UNESCAPED_UNICODE),
+            json_encode($errors,    JSON_UNESCAPED_UNICODE),
+            json_encode($warnings,  JSON_UNESCAPED_UNICODE),
             (int)$row['id'],
         ]);
     }
 
-    // ── Update batch counters ─────────────────────────────────────────────
+    // ── Update batch counters ─────────────────────────────────────────────────
     $db->prepare(
         "UPDATE import_batches
             SET valid_rows=?, warning_rows=?, error_rows=?, batch_status='validated'
@@ -147,7 +157,7 @@ try {
 
     jsonSuccess([
         'batch_id'     => $batchId,
-        'dataset_type' => $datasetType,
+        'dataset_id'   => (int)$batch['dataset_id'],
         'total'        => array_sum($counts),
         'valid'        => $counts['valid'],
         'warning'      => $counts['warning'],

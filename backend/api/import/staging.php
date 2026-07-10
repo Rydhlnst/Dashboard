@@ -40,7 +40,7 @@ try {
     $db = getDB();
 
     // Verify batch exists
-    $bStmt = $db->prepare("SELECT id, dataset_type, batch_status, total_rows, valid_rows, warning_rows, error_rows FROM import_batches WHERE id=?");
+    $bStmt = $db->prepare("SELECT id, dataset_id, dataset_type, batch_status, total_rows, valid_rows, warning_rows, error_rows FROM import_batches WHERE id=?");
     $bStmt->execute([$batchId]);
     $batchMeta = $bStmt->fetch(PDO::FETCH_ASSOC);
     if (!$batchMeta) jsonError("Batch #{$batchId} not found.", 404);
@@ -57,6 +57,20 @@ try {
     $cStmt = $db->prepare("SELECT COUNT(*) FROM import_staging WHERE {$where}");
     $cStmt->execute($params);
     $total = (int)$cStmt->fetchColumn();
+
+    // Load preview column names from dataset schema (first 4 columns)
+    $previewCols = [];
+    if (!empty($batchMeta['dataset_id'])) {
+        $dsStmt = $db->prepare("SELECT columns_schema FROM datasets WHERE id=? LIMIT 1");
+        $dsStmt->execute([$batchMeta['dataset_id']]);
+        $dsRow = $dsStmt->fetch(PDO::FETCH_ASSOC);
+        if ($dsRow) {
+            $dsSchema = json_decode($dsRow['columns_schema'], true) ?? [];
+            foreach (array_slice($dsSchema, 0, 4) as $col) {
+                $previewCols[] = ['col_name' => $col['col_name'], 'label' => $col['label']];
+            }
+        }
+    }
 
     // Fetch rows
     $params[] = $limit;
@@ -76,24 +90,33 @@ try {
         $errors   = json_decode($row['validation_errors']   ?? '[]', true) ?? [];
         $warnings = json_decode($row['validation_warnings'] ?? '[]', true) ?? [];
 
+        // Build dynamic preview values from first columns in schema
+        $previewValues = [];
+        foreach ($previewCols as $pc) {
+            $previewValues[$pc['col_name']] = $cleaned[$pc['col_name']] ?? null;
+        }
+
         $rows[] = [
-            'id'         => (int)$row['id'],
-            'row_number' => (int)$row['row_number'],
-            'status'     => $row['status'],
-            'pdid'       => $cleaned['pdid']       ?? null,
-            'site_name'  => $cleaned['site_name']  ?? null,
-            'status_po'  => $cleaned['status_po']  ?? null,
-            'error_count'   => count($errors),
-            'warning_count' => count($warnings),
-            'errors'   => $errors,
-            'warnings' => $warnings,
+            'id'             => (int)$row['id'],
+            'row_number'     => (int)$row['row_number'],
+            'status'         => $row['status'],
+            'preview_values' => $previewValues,
+            // Legacy fields kept for backward compatibility
+            'pdid'           => $cleaned['pdid']      ?? null,
+            'site_name'      => $cleaned['site_name'] ?? null,
+            'status_po'      => $cleaned['status_po'] ?? null,
+            'error_count'    => count($errors),
+            'warning_count'  => count($warnings),
+            'errors'         => $errors,
+            'warnings'       => $warnings,
         ];
     }
 
     jsonSuccess([
-        'batch'  => $batchMeta,
-        'rows'   => $rows,
-        'meta'   => [
+        'batch'        => $batchMeta,
+        'preview_cols' => $previewCols,
+        'rows'         => $rows,
+        'meta'         => [
             'total'       => $total,
             'page'        => $page,
             'limit'       => $limit,

@@ -105,11 +105,13 @@ export const projectsApi = projectApi;
 // ─── Import (staging pipeline) ──────────────────────────────────────────────
 
 export const importApi = {
-  /** Step 1 — Upload file into staging, returns batch_id + column detection */
-  upload: async (file: File, datasetType: string) => {
+  /** Step 1 — Upload file; auto-infers schema + creates/extends ds_* table */
+  upload: async (file: File, datasetName: string, datasetId?: number, primaryKeyCol?: string) => {
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("dataset_type", datasetType);
+    fd.append("dataset_name", datasetName);
+    if (datasetId) fd.append("dataset_id", String(datasetId));
+    if (primaryKeyCol) fd.append("primary_key_col", primaryKeyCol);
     const res = await fetch(`${API_URL}/api/import/upload.php`, {
       method: "POST",
       credentials: "include",
@@ -118,14 +120,11 @@ export const importApi = {
     return res.json();
   },
 
-  /** Step 2 — Apply column mapping + validate all staging rows */
-  validate: (
-    batchId: number,
-    columnActions: Record<string, { action: "create" | "map" | "ignore"; field_key?: string }>
-  ) =>
+  /** Step 2 — Type-based validation (no column mapping needed) */
+  validate: (batchId: number) =>
     request("/api/import/validate.php", {
       method: "POST",
-      body: JSON.stringify({ batch_id: batchId, column_actions: columnActions }),
+      body: JSON.stringify({ batch_id: batchId }),
     }),
 
   /** Step 3 — Paginated staging rows (for review UI) */
@@ -237,6 +236,37 @@ export const exportApi = {
     const qs = buildQS(params);
     return `${API_URL}/api/export/excel.php${qs ? `?${qs}` : ""}`;
   },
+};
+
+// ─── Dynamic Datasets ───────────────────────────────────────────────────────
+
+export const dynamicChartsApi = {
+  aggregate: (params: Record<string, string | number | undefined | null>) =>
+    request(`/api/charts/aggregate.php?${buildQS(params)}`),
+
+  save: (data: Record<string, unknown>) =>
+    request("/api/charts/save.php", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  list: (datasetId?: number) =>
+    request(`/api/charts/list.php${datasetId ? `?dataset_id=${datasetId}` : ""}`),
+
+  delete: (id: number) =>
+    request(`/api/charts/delete.php?id=${id}`, { method: "DELETE" }),
+};
+
+export const datasetsApi = {
+  list: () => request("/api/datasets/index.php"),
+
+  get: (id: number) => request(`/api/datasets/show.php?id=${id}`),
+
+  delete: (id: number) =>
+    request(`/api/datasets/delete.php?id=${id}`, { method: "DELETE" }),
+
+  query: (params: Record<string, string | number | undefined | null>) =>
+    request(`/api/datasets/query.php?${buildQS(params)}`),
 };
 
 // ─── Audit Logs ─────────────────────────────────────────────────────────────
