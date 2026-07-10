@@ -120,8 +120,8 @@ try {
            (file_name, dataset_type, column_map, unknown_columns, total_rows, imported_by, imported_at, batch_status)
          VALUES (?, ?, ?, ?, ?, ?, NOW(), 'uploading')"
     )->execute([$fileName, $datasetType,
-        json_encode($columnMap, JSON_UNESCAPED_UNICODE),
-        json_encode($unknownColumns, JSON_UNESCAPED_UNICODE),
+        json_encode($columnMap, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
+        json_encode($unknownColumns, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE),
         $totalRows, $admin['id']
     ]);
     $batchId = (int)$db->lastInsertId();
@@ -142,7 +142,7 @@ try {
         $chunk[]  = "(?, ?, ?, 'pending')";
         $params[] = $batchId;
         $params[] = $rowNum;
-        $params[] = json_encode($rowData, JSON_UNESCAPED_UNICODE);
+        $params[] = json_encode($rowData, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         $rowNum++;
 
         if (count($chunk) >= 500) {
@@ -204,8 +204,20 @@ function parseCsvFile(string $path): array
     if ($semicolon > $comma && $semicolon > $tab) $delimiter = ';';
     elseif ($tab > $comma && $tab > $semicolon)   $delimiter = "\t";
 
+    // Detect encoding of the file (check first 4KB)
+    $encodingSample = fread($handle, 4096);
+    rewind($handle);
+    if ($bom === "\xEF\xBB\xBF") fread($handle, 3); // skip BOM
+    $fileEncoding = mb_detect_encoding($encodingSample, ['UTF-8', 'Windows-1252', 'ISO-8859-1', 'ASCII'], true);
+    $needsConvert = ($fileEncoding && $fileEncoding !== 'UTF-8' && $fileEncoding !== 'ASCII');
+
     $allRows = [];
     while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
+        if ($needsConvert) {
+            $row = array_map(function($v) use ($fileEncoding) {
+                return mb_convert_encoding((string)$v, 'UTF-8', $fileEncoding);
+            }, $row);
+        }
         $allRows[] = $row;
     }
     fclose($handle);
