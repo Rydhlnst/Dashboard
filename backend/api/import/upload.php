@@ -2,9 +2,12 @@
 /**
  * POST /api/import/upload.php
  *
- * Accepts a file upload, parses every row, inserts into import_staging,
- * and returns batch metadata + column detection — no data enters
- * project_records yet.
+ * Accepts a file upload (CSV or Excel), parses every row, inserts into
+ * import_staging, and returns batch metadata + column detection.
+ * No data enters project_records until the confirm step.
+ *
+ * CSV  → parsed with native fgetcsv() (PHP 5.3+, works on any server)
+ * XLSX → parsed with PhpSpreadsheet (requires PHP 8.0+)
  */
 
 require_once __DIR__ . '/../../config/cors.php';
@@ -14,16 +17,6 @@ require_once __DIR__ . '/../../helpers/response.php';
 require_once __DIR__ . '/../../helpers/validation.php';
 require_once __DIR__ . '/../../helpers/upload.php';
 require_once __DIR__ . '/../../helpers/column_map.php';
-
-$autoload = __DIR__ . '/../../vendor/autoload.php';
-if (!file_exists($autoload)) {
-    jsonError('PhpSpreadsheet not installed. Run: composer install in /backend', 500);
-}
-require_once $autoload;
-
-use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Shared\Date as ExcelDate;
-use PhpOffice\PhpSpreadsheet\Cell\DataType;
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -52,27 +45,37 @@ try {
 
     $tmpPath  = moveUploadToTemp($file);
     $fileName = basename($file['name']);
+    $ext      = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
 
-    $spreadsheet = IOFactory::load($tmpPath);
-    $sheet       = $spreadsheet->getActiveSheet();
-    $highestRow  = $sheet->getHighestRow();
-    $highestCol  = $sheet->getHighestColumn();
+    // ── Parse file → $rawHeaders, $parsedRows ─────────────────────────────────
+    // $rawHeaders : [ 'A' => 'Header Text', 'B' => 'Header2', ... ]
+    // $parsedRows : [ [ 'A' => 'val', 'B' => 'val', ... ], ... ]  (empty rows excluded)
 
-    if ($highestRow < 2) {
-        cleanupTempFile($tmpPath);
-        jsonError('File must have at least 2 rows (header + 1 data row).', 422);
+    if ($ext === 'csv') {
+        [$rawHeaders, $parsedRows] = parseCsvFile($tmpPath);
+    } else {
+        // Excel — requires PhpSpreadsheet which needs PHP 8.0+
+        $autoload = __DIR__ . '/../../vendor/autoload.php';
+        if (!file_exists($autoload)) {
+            cleanupTempFile($tmpPath);
+            jsonError('PhpSpreadsheet not installed. Run: composer install in /backend', 500);
+        }
+        if (PHP_MAJOR_VERSION < 8) {
+            cleanupTempFile($tmpPath);
+            jsonError('Excel upload requires PHP 8.0 or newer. Please upload a CSV file instead, or ask your host to upgrade PHP.', 500);
+        }
+        require_once $autoload;
+        [$rawHeaders, $parsedRows] = parseExcelFile($tmpPath);
     }
 
-    // Detect header row (row 1 or row 2)
-    $headerRowNum = detectHeaderRow($sheet, $highestCol);
+    if (empty($rawHeaders) || empty($parsedRows)) {
+        cleanupTempFile($tmpPath);
+        jsonError('File must have at least one header row and one data row.', 422);
+    }
 
-    // Read raw headers {colLetter => headerText}
-    $rawHeaders = readHeaderRow($sheet, $highestCol, $headerRowNum);
+    // ── Map headers → DB columns ───────────────────────────────────────────────
+    $mappingResult = mapHeaders($rawHeaders);
 
-    // Map known headers → db columns
-    $mappingResult = mapHeaders($rawHeaders);   // {colLetter => {header, db_col|null}}
-
-    // Build column_map {headerText => db_col} and unknown_columns {colLetter => {header, field_key}}
     $columnMap      = [];
     $unknownColumns = [];
     $db = getDB();
@@ -83,7 +86,6 @@ try {
             $columnMap[$info['header']] = $info['db_col'];
         } else {
             $fk = headerToFieldKey($info['header']);
-            // Check if a dynamic column_definition already covers it
             $stmt = $db->prepare(
                 "SELECT id FROM column_definitions WHERE field_key=? AND dataset_type IN ('all',?) AND is_archived=0 LIMIT 1"
             );
@@ -99,30 +101,20 @@ try {
         }
     }
 
-    // Build preview of first 10 data rows
+    // ── Build preview (first 10 rows) ──────────────────────────────────────────
     $previewRows = [];
-    $dataStart   = $headerRowNum + 1;
-    $previewLimit = 10;
-
-    for ($r = $dataStart; $r <= $highestRow && count($previewRows) < $previewLimit; $r++) {
-        $rowData = [];
-        $isEmpty = true;
+    foreach (array_slice($parsedRows, 0, 10) as $row) {
+        $previewRow = [];
         foreach ($rawHeaders as $colLetter => $header) {
             if ($header === '') continue;
-            $val = getStagingCellValue($sheet->getCell($colLetter . $r));
-            $rowData[$header] = $val;
-            if ($val !== '') $isEmpty = false;
+            $previewRow[$header] = $row[$colLetter] ?? '';
         }
-        if (!$isEmpty) $previewRows[] = $rowData;
+        $previewRows[] = $previewRow;
     }
 
-    // Count total data rows
-    $totalRows = 0;
-    for ($r = $dataStart; $r <= $highestRow; $r++) {
-        if (!isEmptyRow($sheet, $rawHeaders, $r)) $totalRows++;
-    }
+    $totalRows = count($parsedRows);
 
-    // Create import_batch record
+    // ── Create import_batch record ─────────────────────────────────────────────
     $db->prepare(
         "INSERT INTO import_batches
            (file_name, dataset_type, column_map, unknown_columns, total_rows, imported_by, imported_at, batch_status)
@@ -134,28 +126,25 @@ try {
     ]);
     $batchId = (int)$db->lastInsertId();
 
-    // Batch-insert all data rows into import_staging
+    // ── Batch-insert rows into import_staging ──────────────────────────────────
     $insertSql = "INSERT INTO import_staging (batch_id, `row_number`, raw_data, status) VALUES ";
-    $chunk      = [];
-    $params     = [];
+    $chunk  = [];
+    $params = [];
+    $rowNum = 2; // Logical row number (1 = header)
 
-    for ($r = $dataStart; $r <= $highestRow; $r++) {
+    foreach ($parsedRows as $row) {
         $rowData = [];
-        $isEmpty = true;
         foreach ($rawHeaders as $colLetter => $header) {
             if ($header === '') continue;
-            $val = getStagingCellValue($sheet->getCell($colLetter . $r));
-            $rowData[$header] = $val;
-            if ($val !== '') $isEmpty = false;
+            $rowData[$header] = $row[$colLetter] ?? '';
         }
-        if ($isEmpty) continue;
 
         $chunk[]  = "(?, ?, ?, 'pending')";
         $params[] = $batchId;
-        $params[] = $r;
+        $params[] = $rowNum;
         $params[] = json_encode($rowData, JSON_UNESCAPED_UNICODE);
+        $rowNum++;
 
-        // Flush every 500 rows
         if (count($chunk) >= 500) {
             $db->prepare($insertSql . implode(',', $chunk))->execute($params);
             $chunk  = [];
@@ -176,8 +165,8 @@ try {
         'file_name'       => $fileName,
         'dataset_type'    => $datasetType,
         'total_rows'      => $totalRows,
-        'column_map'      => $columnMap,      // {header: db_field}
-        'unknown_columns' => $unknownColumns, // {colLetter: {header, field_key, in_col_defs}}
+        'column_map'      => $columnMap,
+        'unknown_columns' => $unknownColumns,
         'known_count'     => count($columnMap),
         'unknown_count'   => count($unknownColumns),
         'preview_rows'    => $previewRows,
@@ -189,53 +178,161 @@ try {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// CSV parser — native PHP, no dependencies
+// Returns [ rawHeaders, parsedRows ]
+// rawHeaders : [ 'A' => 'Header', 'B' => 'Header2', ... ]
+// parsedRows : [ [ 'A' => 'val', ... ], ... ]  empty rows excluded
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getStagingCellValue($cell): string {
+function parseCsvFile(string $path): array
+{
+    $handle = fopen($path, 'r');
+    if ($handle === false) throw new RuntimeException('Cannot open CSV file.');
+
+    // Strip UTF-8 BOM if present
+    $bom = fread($handle, 3);
+    if ($bom !== "\xEF\xBB\xBF") rewind($handle);
+
+    // Detect delimiter (comma vs semicolon vs tab)
+    $sample = fgets($handle);
+    rewind($handle);
+    if ($bom === "\xEF\xBB\xBF") fread($handle, 3); // skip BOM again
+    $comma     = substr_count($sample, ',');
+    $semicolon = substr_count($sample, ';');
+    $tab       = substr_count($sample, "\t");
+    $delimiter = ',';
+    if ($semicolon > $comma && $semicolon > $tab) $delimiter = ';';
+    elseif ($tab > $comma && $tab > $semicolon)   $delimiter = "\t";
+
+    $allRows = [];
+    while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
+        $allRows[] = $row;
+    }
+    fclose($handle);
+
+    if (count($allRows) < 2) {
+        throw new RuntimeException('File must have at least 2 rows (header + 1 data row).');
+    }
+
+    // Detect header row: the row with more filled cells is the header
+    $count0 = count(array_filter($allRows[0], function($v) { return trim((string)$v) !== ''; }));
+    $count1 = isset($allRows[1]) ? count(array_filter($allRows[1], function($v) { return trim((string)$v) !== ''; })) : 0;
+    $headerIdx = ($count1 > $count0) ? 1 : 0;
+
+    // Build rawHeaders keyed by Excel-style column letter (A, B, ..., Z, AA, ...)
+    $rawHeaders = [];
+    foreach ($allRows[$headerIdx] as $i => $header) {
+        $rawHeaders[indexToColumnLetter($i)] = trim((string)$header);
+    }
+
+    // Build parsedRows — skip empty rows
+    $parsedRows = [];
+    for ($r = $headerIdx + 1; $r < count($allRows); $r++) {
+        $row     = $allRows[$r];
+        $rowData = [];
+        $isEmpty = true;
+        foreach ($rawHeaders as $colLetter => $header) {
+            $idx = columnLetterToIndex($colLetter);
+            $val = isset($row[$idx]) ? trim((string)$row[$idx]) : '';
+            $rowData[$colLetter] = $val;
+            if ($val !== '') $isEmpty = false;
+        }
+        if (!$isEmpty) $parsedRows[] = $rowData;
+    }
+
+    return [$rawHeaders, $parsedRows];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Excel parser — uses PhpSpreadsheet (PHP 8.0+ required)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseExcelFile(string $path): array
+{
+    // These classes are only available after require_once autoload.php
+    $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($path);
+    $sheet       = $spreadsheet->getActiveSheet();
+    $highestRow  = $sheet->getHighestRow();
+    $highestCol  = $sheet->getHighestColumn();
+
+    if ($highestRow < 2) {
+        throw new RuntimeException('File must have at least 2 rows (header + 1 data row).');
+    }
+
+    // Detect header row
+    $row1Filled = $row2Filled = 0;
+    foreach ($sheet->getColumnIterator('A', $highestCol) as $col) {
+        $idx = $col->getColumnIndex();
+        if (trim((string)$sheet->getCell($idx . '1')->getValue()) !== '') $row1Filled++;
+        if (trim((string)$sheet->getCell($idx . '2')->getValue()) !== '') $row2Filled++;
+    }
+    $headerRowNum = ($row2Filled > $row1Filled) ? 2 : 1;
+
+    // Build rawHeaders
+    $rawHeaders = [];
+    foreach ($sheet->getColumnIterator('A', $highestCol) as $col) {
+        $idx = $col->getColumnIndex();
+        $rawHeaders[$idx] = trim((string)$sheet->getCell($idx . $headerRowNum)->getValue());
+    }
+
+    // Build parsedRows
+    $parsedRows = [];
+    for ($r = $headerRowNum + 1; $r <= $highestRow; $r++) {
+        $rowData = [];
+        $isEmpty = true;
+        foreach ($rawHeaders as $colLetter => $header) {
+            $val = excelCellValue($sheet->getCell($colLetter . $r));
+            $rowData[$colLetter] = $val;
+            if ($val !== '') $isEmpty = false;
+        }
+        if (!$isEmpty) $parsedRows[] = $rowData;
+    }
+
+    return [$rawHeaders, $parsedRows];
+}
+
+function excelCellValue($cell): string
+{
     $value = $cell->getValue();
     if ($value === null) return '';
 
-    // Resolve formula
-    if ($cell->getDataType() === DataType::TYPE_FORMULA) {
+    if ($cell->getDataType() === \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_FORMULA) {
         try { $value = $cell->getCalculatedValue(); }
         catch (Throwable $e) { $value = $cell->getOldCalculatedValue(); }
     }
 
-    // Convert Excel serial dates to ISO string
-    if ((is_float($value) || is_int($value)) && ExcelDate::isDateTime($cell)) {
+    if ((is_float($value) || is_int($value)) &&
+        \PhpOffice\PhpSpreadsheet\Shared\Date::isDateTime($cell)) {
         try {
-            return ExcelDate::excelToDateTimeObject((float)$value)->format('Y-m-d');
+            return \PhpOffice\PhpSpreadsheet\Shared\Date::excelToDateTimeObject((float)$value)
+                ->format('Y-m-d');
         } catch (Throwable $e) {}
     }
 
     return trim((string)$value);
 }
 
-function detectHeaderRow($sheet, string $highestCol): int {
-    // Row 2 is header if row 1 looks like a title (few filled cells)
-    $row1Filled = 0;
-    $row2Filled = 0;
-    foreach ($sheet->getColumnIterator('A', $highestCol) as $col) {
-        $idx = $col->getColumnIndex();
-        if (trim((string)$sheet->getCell($idx . '1')->getValue()) !== '') $row1Filled++;
-        if (trim((string)$sheet->getCell($idx . '2')->getValue()) !== '') $row2Filled++;
-    }
-    return ($row2Filled > $row1Filled) ? 2 : 1;
+// ─────────────────────────────────────────────────────────────────────────────
+// Column letter ↔ index helpers  (A=0, B=1, ..., Z=25, AA=26, ...)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function indexToColumnLetter(int $index): string
+{
+    $letter = '';
+    $n      = $index;
+    do {
+        $letter = chr(65 + ($n % 26)) . $letter;
+        $n      = intdiv($n, 26) - 1;
+    } while ($n >= 0);
+    return $letter;
 }
 
-function readHeaderRow($sheet, string $highestCol, int $rowNum): array {
-    $headers = [];
-    foreach ($sheet->getColumnIterator('A', $highestCol) as $col) {
-        $idx = $col->getColumnIndex();
-        $headers[$idx] = trim((string)$sheet->getCell($idx . $rowNum)->getValue());
+function columnLetterToIndex(string $letter): int
+{
+    $letter = strtoupper($letter);
+    $index  = 0;
+    for ($i = 0; $i < strlen($letter); $i++) {
+        $index = $index * 26 + (ord($letter[$i]) - 64);
     }
-    return $headers;
-}
-
-function isEmptyRow($sheet, array $headers, int $rowNum): bool {
-    foreach (array_keys($headers) as $colLetter) {
-        if (trim((string)$sheet->getCell($colLetter . $rowNum)->getValue()) !== '') return false;
-    }
-    return true;
+    return $index - 1;
 }
