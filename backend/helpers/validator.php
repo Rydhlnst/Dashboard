@@ -43,7 +43,7 @@ function normaliseStatusPo(string $raw): string {
 function computeBlocking(array $cleaned): bool {
     $pic = strtoupper(trim($cleaned['pic_blocking'] ?? ''));
     if ($pic === '') return false;
-    return str_contains($pic, 'TSEL')
+    return strpos($pic, 'TSEL') !== false
         || preg_match('/\bTI\b/', $pic)
         || preg_match('/\bTP\b/', $pic);
 }

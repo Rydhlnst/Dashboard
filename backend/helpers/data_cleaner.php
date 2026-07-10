@@ -220,12 +220,10 @@ function cleanText(string $raw, bool $long = false): array {
  */
 function cleanFieldValue(string $fieldKey, string $rawVal): array {
     $type = getFieldType($fieldKey);
-    return match ($type) {
-        'date'     => cleanDate($rawVal),
-        'currency' => cleanCurrency($rawVal),
-        'decimal'  => cleanDecimal($rawVal),
-        'year'     => cleanYear($rawVal),
-        'longtext' => cleanText($rawVal, true),
-        default    => cleanText($rawVal, false),   // 'text' and everything else
-    };
+    if ($type === 'date')     return cleanDate($rawVal);
+    if ($type === 'currency') return cleanCurrency($rawVal);
+    if ($type === 'decimal')  return cleanDecimal($rawVal);
+    if ($type === 'year')     return cleanYear($rawVal);
+    if ($type === 'longtext') return cleanText($rawVal, true);
+    return cleanText($rawVal, false);
 }
