@@ -2,11 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getStoredUser, setStoredUser } from "@/lib/auth";
+import { getStoredUser, setStoredUser, clearStoredUser } from "@/lib/auth";
 import { authApi } from "@/lib/api";
 import { AuthUser } from "@/types/user";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
+
+// Module-level cache: verify session with server at most once every 5 minutes
+let meCache: { user: AuthUser; ts: number } | null = null;
+const ME_TTL = 5 * 60 * 1000;
+
+function isCacheValid() {
+  return meCache !== null && Date.now() - meCache.ts < ME_TTL;
+}
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -21,23 +29,49 @@ export function AppLayout({ children, title, adminOnly = false }: AppLayoutProps
 
   useEffect(() => {
     const stored = getStoredUser();
-    if (stored) {
-      setUser(stored);
+
+    // Use cache if still valid and user is still stored (not logged out)
+    if (isCacheValid() && meCache && stored) {
+      setUser(meCache.user);
       setLoading(false);
+      return;
     }
 
-    authApi.me().then((res: any) => {
-      if (res.success && res.data) {
-        setStoredUser(res.data);
-        setUser(res.data);
-      } else {
-        router.replace("/login");
-      }
-    }).catch(() => {
-      router.replace("/login");
-    }).finally(() => {
+    if (stored) {
+      // Show page immediately with stored data while we verify in background
+      setUser(stored);
       setLoading(false);
-    });
+
+      authApi.me().then((res: any) => {
+        if (res.success && res.data) {
+          meCache = { user: res.data as AuthUser, ts: Date.now() };
+          setStoredUser(res.data);
+          setUser(res.data);
+        } else {
+          // Explicit rejection from server (e.g. session expired)
+          meCache = null;
+          clearStoredUser();
+          router.replace("/login");
+        }
+      }).catch(() => {
+        // Network error — keep local session, don't log out
+      });
+    } else {
+      // No stored user, must verify with server
+      authApi.me().then((res: any) => {
+        if (res.success && res.data) {
+          meCache = { user: res.data as AuthUser, ts: Date.now() };
+          setStoredUser(res.data);
+          setUser(res.data);
+        } else {
+          router.replace("/login");
+        }
+      }).catch(() => {
+        router.replace("/login");
+      }).finally(() => {
+        setLoading(false);
+      });
+    }
   }, [router]);
 
   const isAdmin = (role: string) => role === "admin" || role === "super_admin";
