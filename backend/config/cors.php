@@ -1,7 +1,10 @@
 <?php
 // ── Load .env ───────────────────────────────────────────────────────────────
-$envFile = __DIR__ . '/../../.env';
-if (file_exists($envFile)) {
+$envFile = null;
+foreach ([__DIR__ . '/../.env', __DIR__ . '/../../.env'] as $p) {
+    if (file_exists($p)) { $envFile = $p; break; }
+}
+if ($envFile) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
         if (strpos(trim($line), '#') === 0) continue;
