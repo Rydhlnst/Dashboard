@@ -4,7 +4,7 @@
 // JSON_HEX_TAG tidak diperlukan karena frontend React escape output-nya sendiri
 const JSON_FLAGS = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
 
-function jsonSuccess(mixed $data = null, string $message = 'Success', int $code = 200): void {
+function jsonSuccess($data = null, string $message = 'Success', int $code = 200): void {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
     try {
@@ -20,7 +20,7 @@ function jsonSuccess(mixed $data = null, string $message = 'Success', int $code 
     exit;
 }
 
-function jsonError(string $message = 'Error', int $code = 400, mixed $errors = null): void {
+function jsonError(string $message = 'Error', int $code = 400, $errors = null): void {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
     $body = ['success' => false, 'message' => $message];
@@ -62,9 +62,7 @@ function getRequestBody(): array {
     try {
         $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         return is_array($data) ? $data : [];
-    } catch (JsonException) {
-        // Request body bukan JSON valid — kembalikan array kosong
-        // Endpoint akan gagal di validasi required fields
+    } catch (JsonException $e) {
         return [];
     }
 }
