@@ -1,0 +1,20 @@
+Options -MultiViews
+RewriteEngine On
+
+# Handle root
+RewriteRule ^$ /index.html [L]
+
+# Serve existing files/dirs directly
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# For SPA pages — serve the subfolder's index.html
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([^/.]+)/?$ /$1/index.html [L]
+
+# Nested routes
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([^/.]+)/([^/.]+)/?$ /$1/$2/index.html [L]

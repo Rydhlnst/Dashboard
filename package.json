@@ -1,0 +1,14 @@
+{
+  "name": "dashboard-monitoring",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n \"frontend,backend\" -c \"cyan.bold,green.bold\" \"pnpm --filter ./frontend run dev\" \"php -S localhost:8000 -t backend\"",
+    "build": "pnpm --filter ./frontend run build",
+    "frontend:dev": "pnpm --filter ./frontend run dev",
+    "backend:dev": "php -S localhost:8000 -t backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

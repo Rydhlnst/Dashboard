@@ -1,0 +1,20 @@
+Options -Indexes
+
+# Protect sensitive files
+<FilesMatch "^(\.env|composer\.json|composer\.lock)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Protect upload temp directory listing
+<IfModule mod_autoindex.c>
+    Options -Indexes
+</IfModule>
+
+# PHP settings
+<IfModule mod_php.c>
+    php_value upload_max_filesize 10M
+    php_value post_max_size 12M
+    php_value max_execution_time 120
+    php_value memory_limit 256M
+</IfModule>
