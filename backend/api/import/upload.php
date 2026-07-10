@@ -199,14 +199,14 @@ function getStagingCellValue($cell): string {
     // Resolve formula
     if ($cell->getDataType() === DataType::TYPE_FORMULA) {
         try { $value = $cell->getCalculatedValue(); }
-        catch (Throwable) { $value = $cell->getOldCalculatedValue(); }
+        catch (Throwable $e) { $value = $cell->getOldCalculatedValue(); }
     }
 
     // Convert Excel serial dates to ISO string
     if ((is_float($value) || is_int($value)) && ExcelDate::isDateTime($cell)) {
         try {
             return ExcelDate::excelToDateTimeObject((float)$value)->format('Y-m-d');
-        } catch (Throwable) {}
+        } catch (Throwable $e) {}
     }
 
     return trim((string)$value);
