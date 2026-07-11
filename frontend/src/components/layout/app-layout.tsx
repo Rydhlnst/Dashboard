@@ -23,15 +23,25 @@ interface AppLayoutProps {
 }
 
 export function AppLayout({ children, title, adminOnly = false }: AppLayoutProps) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Initialize directly from cache/localStorage so there is no spinner flash
+  // on navigations where the user is already authenticated.
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    if (typeof window === "undefined") return null;
+    if (isCacheValid() && meCache) return meCache.user;
+    return getStoredUser();
+  });
+  const [loading, setLoading] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    if (isCacheValid() && meCache) return false;
+    return getStoredUser() === null; // only show spinner when there is truly no user
+  });
   const router = useRouter();
 
   useEffect(() => {
     const stored = getStoredUser();
 
-    // Use cache if still valid and user is still stored (not logged out)
-    if (isCacheValid() && meCache && stored) {
+    // Cache valid — no network call needed, just ensure state is current
+    if (isCacheValid() && meCache) {
       setUser(meCache.user);
       setLoading(false);
       return;
