@@ -148,24 +148,34 @@ function inferColType(array $samples): string
     }
     if (empty($values)) return 'VARCHAR(255)';
 
-    $n        = count($values);
-    $dateHits = 0;
-    $numHits  = 0;
-    $decHits  = 0;
-    $maxLen   = 0;
-    $allYear  = true;
+    $n                 = count($values);
+    $dateHits          = 0;
+    $numHits           = 0;
+    $decHits           = 0;
+    $maxLen            = 0;
+    $allYear           = true;
+    $hasStructuredCode = false;   // mixed letters+digits that are not dates/currency
 
     foreach ($values as $v) {
         $maxLen = max($maxLen, mb_strlen($v));
-        if (looksLikeDate($v)) $dateHits++;
+        if (looksLikeDate($v)) {
+            $dateHits++;
+            if (!preg_match('/^(19|20)\d{2}$/', $v)) $allYear = false;
+            continue;
+        }
 
         // Strip currency/thousand-separator artefacts before numeric test
         $stripped = preg_replace('/[Rp$€£,\s]/', '', $v);
         $stripped = preg_replace('/\b(IDR|USD|EUR|GBP)\b/i', '', $stripped);
         $stripped = trim($stripped);
+
         if ($stripped !== '' && is_numeric($stripped)) {
             $numHits++;
             if (strpos($stripped, '.') !== false) $decHits++;
+        } elseif (preg_match('/[A-Za-z]/', $stripped) && preg_match('/\d/', $stripped)) {
+            // Value has both letters and digits and is not a date/currency
+            // → likely a reference/code column (e.g. PO numbers like "0365/TC.03/EN-01")
+            $hasStructuredCode = true;
         }
 
         if (!preg_match('/^(19|20)\d{2}$/', $v)) $allYear = false;
@@ -175,11 +185,17 @@ function inferColType(array $samples): string
         return $n > 0 ? ($hits / $n) : 0.0;
     };
 
-    if ($pct($dateHits) >= 0.8)                        return 'DATE';
-    if ($allYear && $pct($numHits) >= 0.95)            return 'SMALLINT UNSIGNED';
-    if ($pct($numHits) >= 0.8)                         return 'DECIMAL(18,4)';
-    if ($maxLen > 500)                                  return 'TEXT';
-    if ($maxLen > 255)                                  return 'VARCHAR(500)';
+    if ($pct($dateHits) >= 0.8) return 'DATE';
+
+    // Skip numeric inference entirely when the column contains structured codes
+    // (reference numbers, PO codes, etc.) — must stay VARCHAR to preserve values
+    if (!$hasStructuredCode) {
+        if ($allYear && $pct($numHits) >= 0.95) return 'SMALLINT UNSIGNED';
+        if ($pct($numHits) >= 0.8)              return 'DECIMAL(18,4)';
+    }
+
+    if ($maxLen > 500) return 'TEXT';
+    if ($maxLen > 255) return 'VARCHAR(500)';
     return 'VARCHAR(255)';
 }
 
@@ -274,6 +290,11 @@ function findNewColumns(array $newCols, array $existingSchema): array
 /**
  * Clean a raw string value according to its inferred column type.
  *
+ * Normalization rules applied (Data Analyst approach):
+ *  - DATE  : Excel zero-date (d/0/yyyy), semantic placeholders (Drop, Cancel, Hold, …) → NULL silently
+ *  - INT   : boolean flags ('x','v','y','ok','✓') → 1; reference codes in int columns → NULL silently
+ *  - DECIMAL: same flag/code handling as INT
+ *
  * @return array [$cleanedValue, $warnings[], $errors[]]
  */
 function cleanValueByType(string $rawVal, string $colType): array
@@ -285,37 +306,89 @@ function cleanValueByType(string $rawVal, string $colType): array
     // Treat empty / dash as NULL
     if ($val === '' || $val === '-') return [null, $warnings, $errors];
 
-    $type = strtoupper(trim($colType));
+    $type  = strtoupper(trim($colType));
+    $lower = strtolower($val);
+
+    // ── DATE ──────────────────────────────────────────────────────────────────
 
     if ($type === 'DATE') {
+        // Semantic placeholder values → NULL with a warning so the user sees the row was cleaned
+        static $semanticNullDates = [
+            'n/a','#n/a','#value!','#ref!','tbd','tbc','n.a','na','none',
+            '-','0','drop','cancel','cancelled','hold','pending','void',
+            'blank','n/d','nd','nil','#na','#n/d','delete','deleted',
+        ];
+        if (in_array($lower, $semanticNullDates, true)) {
+            $warnings[] = "Auto-cleaned: placeholder date '{$val}' set to NULL.";
+            return [null, $warnings, $errors];
+        }
+
+        // Excel zero-date artifact: day component = 0 (e.g. "1/0/1900") → NULL with warning
+        if (preg_match('/^\d{1,2}\/0\/\d{4}$/', $val)) {
+            $warnings[] = "Auto-cleaned: Excel zero-date '{$val}' set to NULL.";
+            return [null, $warnings, $errors];
+        }
+
         $parsed = tryParseAnyDate($val);
         if ($parsed !== null) return [$parsed, $warnings, $errors];
+
         $warnings[] = "Could not parse date '{$val}' — stored as empty.";
         return [null, $warnings, $errors];
     }
 
+    // ── DECIMAL ───────────────────────────────────────────────────────────────
+
     if ($type === 'DECIMAL(18,4)') {
+        // Boolean flag values → normalize to 1 (warn so row is visible in review)
+        static $flagValsDec = ['x','v','y','yes','true','done','ok','✓','√','■','●'];
+        if (in_array($lower, $flagValsDec, true)) {
+            $warnings[] = "Auto-cleaned: boolean flag '{$val}' normalized to 1.";
+            return [1.0, $warnings, $errors];
+        }
+
         $stripped = preg_replace('/[Rp$€£,\s]/', '', $val);
         $stripped = preg_replace('/\b(IDR|USD|EUR|GBP)\b/i', '', $stripped);
         $stripped = trim($stripped);
         if (is_numeric($stripped)) return [round((float)$stripped, 4), $warnings, $errors];
+
+        // Structured reference code (letters + digits) → NULL with warning
+        if (preg_match('/[A-Za-z]/', $val) && preg_match('/\d/', $val)) {
+            $warnings[] = "Auto-cleaned: reference code '{$val}' cannot be stored as DECIMAL — set to NULL.";
+            return [null, $warnings, $errors];
+        }
+
         $warnings[] = "Could not parse number '{$val}' — stored as empty.";
         return [null, $warnings, $errors];
     }
 
-    if ($type === 'SMALLINT UNSIGNED') {
-        $stripped = preg_replace('/\D/', '', $val);
+    // ── SMALLINT / INT / BIGINT ───────────────────────────────────────────────
+
+    if ($type === 'SMALLINT UNSIGNED' || $type === 'INT UNSIGNED' || $type === 'BIGINT UNSIGNED') {
+        // Boolean flag values → normalize to 1 (warn so row is visible in review)
+        static $flagValsInt = ['x','v','y','yes','true','done','ok','✓','√','■','●'];
+        if (in_array($lower, $flagValsInt, true)) {
+            $warnings[] = "Auto-cleaned: boolean flag '{$val}' normalized to 1.";
+            return [1, $warnings, $errors];
+        }
+
+        $stripped = preg_replace('/[^0-9]/', '', $val);
         if ($stripped !== '') return [(int)$stripped, $warnings, $errors];
+
+        // Text/reference in integer column → NULL with warning
+        if (preg_match('/[A-Za-z]/', $val) && preg_match('/\d/', $val)) {
+            $warnings[] = "Auto-cleaned: reference code '{$val}' cannot be stored as integer — set to NULL.";
+            return [null, $warnings, $errors];
+        }
+        if (preg_match('/[A-Za-z]/', $val)) {
+            $warnings[] = "Auto-cleaned: text value '{$val}' cannot be stored as integer — set to NULL.";
+            return [null, $warnings, $errors];
+        }
+
         $warnings[] = "Could not parse integer '{$val}' — stored as empty.";
         return [null, $warnings, $errors];
     }
 
-    if ($type === 'INT UNSIGNED' || $type === 'BIGINT UNSIGNED') {
-        $stripped = preg_replace('/[^0-9]/', '', $val);
-        if ($stripped !== '') return [(int)$stripped, $warnings, $errors];
-        $warnings[] = "Could not parse integer '{$val}' — stored as empty.";
-        return [null, $warnings, $errors];
-    }
+    // ── TEXT / LONGTEXT ───────────────────────────────────────────────────────
 
     if ($type === 'TEXT' || $type === 'LONGTEXT') {
         $val = strip_tags($val);
@@ -323,7 +396,8 @@ function cleanValueByType(string $rawVal, string $colType): array
         return [$val, $warnings, $errors];
     }
 
-    // VARCHAR(255) / VARCHAR(500) / default
+    // ── VARCHAR(255) / VARCHAR(500) / default ─────────────────────────────────
+
     $val    = strip_tags($val);
     $val    = preg_replace('/\s+/', ' ', $val);
     $maxLen = (strpos($type, '500') !== false) ? 500 : 255;
@@ -383,4 +457,179 @@ function sbParseMonthName(string $name): ?int
         'oct'=>10,'october'=>10,'nov'=>11,'november'=>11,'dec'=>12,'december'=>12,
     ];
     return $map[strtolower($name)] ?? null;
+}
+
+// ── Full-column profiling (Data Analyst approach) ──────────────────────────────
+
+/**
+ * Profile all raw values in a column and return statistics + planned normalizations.
+ *
+ * Mirrors the normalization rules in cleanValueByType() so the user can see
+ * exactly what will happen to their data before committing the import.
+ *
+ * @param array  $rawValues  All raw string values for this column (from every row)
+ * @param string $colType    Inferred SQL type
+ * @param string $colLabel   Original header label from the file
+ * @param string $colName    Sanitised DB column name
+ * @return array Profile object
+ */
+function profileColumn(array $rawValues, string $colType, string $colLabel, string $colName): array
+{
+    static $semanticNullDates = [
+        'n/a','#n/a','#value!','#ref!','tbd','tbc','n.a','na','none',
+        '-','0','drop','cancel','cancelled','hold','pending','void',
+        'blank','n/d','nd','nil','#na','#n/d','delete','deleted',
+    ];
+    static $booleanFlags = ['x','v','y','yes','true','done','ok','✓','√','■','●'];
+
+    $total      = 0;
+    $nullCount  = 0;
+    $uniqueMap  = [];  // value => count, capped at 500 for memory
+    $numVals    = [];  // numeric values for min/max (capped at 10000)
+    $dateMin    = null;
+    $dateMax    = null;
+
+    // Normalization counters and examples
+    $normCounts   = [];
+    $normExamples = [];
+
+    foreach ($rawValues as $raw) {
+        $v = trim((string)$raw);
+        $total++;
+
+        if ($v === '' || strcasecmp($v, 'null') === 0) {
+            $nullCount++;
+            continue;
+        }
+
+        $lower = strtolower($v);
+
+        // Track unique values (capped to limit memory on very wide datasets)
+        if (!isset($uniqueMap[$v])) {
+            if (count($uniqueMap) < 500) {
+                $uniqueMap[$v] = 1;
+            }
+        } else {
+            $uniqueMap[$v]++;
+        }
+
+        $type = strtoupper(trim($colType));
+
+        if ($type === 'DATE') {
+            // Excel zero-date
+            if (preg_match('/^\d{1,2}\/0\/\d{4}$/', $v)) {
+                $key = 'excel_zero_date';
+                $normCounts[$key]   = ($normCounts[$key]   ?? 0) + 1;
+                if (!isset($normExamples[$key]) || count($normExamples[$key]) < 3) {
+                    $normExamples[$key][] = $v;
+                }
+            // Semantic null placeholder
+            } elseif (in_array($lower, $semanticNullDates, true)) {
+                $key = 'semantic_null';
+                $normCounts[$key]   = ($normCounts[$key]   ?? 0) + 1;
+                if (!isset($normExamples[$key]) || count($normExamples[$key]) < 3) {
+                    $normExamples[$key][] = $v;
+                }
+            // Valid date — track min/max
+            } elseif (looksLikeDate($v)) {
+                $parsed = tryParseAnyDate($v);
+                if ($parsed !== null) {
+                    if ($dateMin === null || $parsed < $dateMin) $dateMin = $parsed;
+                    if ($dateMax === null || $parsed > $dateMax) $dateMax = $parsed;
+                }
+            }
+
+        } elseif ($type === 'DECIMAL(18,4)' || $type === 'SMALLINT UNSIGNED'
+               || $type === 'INT UNSIGNED'   || $type === 'BIGINT UNSIGNED') {
+
+            if (in_array($lower, $booleanFlags, true)) {
+                $key = 'boolean_flag';
+                $normCounts[$key]   = ($normCounts[$key]   ?? 0) + 1;
+                if (!isset($normExamples[$key]) || count($normExamples[$key]) < 3) {
+                    $normExamples[$key][] = $v;
+                }
+            } elseif (preg_match('/[A-Za-z]/', $v) && preg_match('/\d/', $v)) {
+                $key = 'reference_code';
+                $normCounts[$key]   = ($normCounts[$key]   ?? 0) + 1;
+                if (!isset($normExamples[$key]) || count($normExamples[$key]) < 3) {
+                    $normExamples[$key][] = $v;
+                }
+            } elseif (preg_match('/[A-Za-z]/', $v)) {
+                $key = 'text_in_numeric';
+                $normCounts[$key]   = ($normCounts[$key]   ?? 0) + 1;
+                if (!isset($normExamples[$key]) || count($normExamples[$key]) < 3) {
+                    $normExamples[$key][] = $v;
+                }
+            } else {
+                $stripped = preg_replace('/[Rp$€£,\s]/', '', $v);
+                $stripped = preg_replace('/\b(IDR|USD|EUR|GBP)\b/i', '', $stripped);
+                if (is_numeric(trim($stripped)) && count($numVals) < 10000) {
+                    $numVals[] = (float)trim($stripped);
+                }
+            }
+        }
+    }
+
+    // Top 5 values by frequency
+    arsort($uniqueMap);
+    $topValues = [];
+    $i = 0;
+    foreach ($uniqueMap as $val => $count) {
+        if ($i >= 5) break;
+        $topValues[] = ['value' => $val, 'count' => $count];
+        $i++;
+    }
+
+    // Build normalization list (labels for the UI)
+    static $normLabels = [
+        'excel_zero_date' => 'Excel zero-date (e.g. 1/0/1900)',
+        'semantic_null'   => 'Semantic empty placeholder',
+        'boolean_flag'    => 'Boolean flag (x / v / y)',
+        'reference_code'  => 'Reference/code value in numeric column',
+        'text_in_numeric' => 'Text value in numeric column',
+    ];
+    static $normActions = [
+        'excel_zero_date' => '→ NULL (silently)',
+        'semantic_null'   => '→ NULL (silently)',
+        'boolean_flag'    => '→ 1',
+        'reference_code'  => '→ NULL (silently)',
+        'text_in_numeric' => '→ NULL (silently)',
+    ];
+
+    $normalizations = [];
+    foreach ($normCounts as $key => $count) {
+        $normalizations[] = [
+            'type'     => $key,
+            'label'    => $normLabels[$key]  ?? $key,
+            'action'   => $normActions[$key] ?? '→ transformed',
+            'count'    => $count,
+            'examples' => $normExamples[$key] ?? [],
+        ];
+    }
+
+    $filled = $total - $nullCount;
+    $profile = [
+        'col_name'       => $colName,
+        'label'          => $colLabel,
+        'col_type'       => $colType,
+        'total'          => $total,
+        'null_count'     => $nullCount,
+        'fill_count'     => $filled,
+        'fill_pct'       => $total > 0 ? round($filled / $total * 100, 1) : 0.0,
+        'unique_count'   => count($uniqueMap),
+        'top_values'     => $topValues,
+        'normalizations' => $normalizations,
+        'norm_total'     => array_sum($normCounts),
+    ];
+
+    if (!empty($numVals)) {
+        $profile['num_min'] = min($numVals);
+        $profile['num_max'] = max($numVals);
+    }
+    if ($dateMin !== null) {
+        $profile['date_min'] = $dateMin;
+        $profile['date_max'] = $dateMax;
+    }
+
+    return $profile;
 }

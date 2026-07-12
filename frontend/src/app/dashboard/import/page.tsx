@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback, useRef, memo } from "react";
+import { useState, useCallback, useRef, memo, useEffect } from "react";
 import { AppLayout } from "@/components/layout/app-layout";
-import { importApi } from "@/lib/api";
+import { importApi, datasetsApi } from "@/lib/api";
+import { invalidateSidebarCache } from "@/lib/sidebar-cache";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,10 +11,12 @@ import { toast } from "sonner";
 import {
   Upload, CheckCircle2, XCircle, RotateCcw,
   FileSpreadsheet, Loader2, ChevronDown, ChevronUp, DatabaseZap,
-  ArrowRight, Info,
+  ArrowRight, Info, PanelLeft, AlertTriangle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
+
+interface ExistingDataset { id: number; name: string; page_label: string | null }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +24,32 @@ type Step = 1 | 2 | 3 | 4 | 5;
 type RowStatus = "valid" | "warning" | "error" | "pending" | "imported";
 
 interface ColDef { col_name: string; col_type: string; label: string }
+
+interface NormPlan {
+  type: string;
+  label: string;
+  action: string;
+  count: number;
+  examples: string[];
+}
+
+interface ColProfile {
+  col_name: string;
+  label: string;
+  col_type: string;
+  total: number;
+  null_count: number;
+  fill_count: number;
+  fill_pct: number;
+  unique_count: number;
+  top_values: { value: string; count: number }[];
+  normalizations: NormPlan[];
+  norm_total: number;
+  num_min?: number;
+  num_max?: number;
+  date_min?: string;
+  date_max?: string;
+}
 
 interface UploadResult {
   batch_id: number;
@@ -32,6 +61,7 @@ interface UploadResult {
   columns: ColDef[];
   new_columns: ColDef[];
   preview_rows: Record<string, string>[];
+  column_profiles?: ColProfile[];
 }
 
 interface ValidationSummary {
@@ -199,6 +229,135 @@ const ExpandableRow = memo(({ row, previewCols }: { row: StagingRow; previewCols
 });
 ExpandableRow.displayName = "ExpandableRow";
 
+// ─── Column profile card ───────────────────────────────────────────────────────
+
+const ColumnProfileCard = memo(({ profile, isNew, expanded, onToggle }: {
+  profile: ColProfile;
+  isNew: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+}) => {
+  const hasNorms = profile.norm_total > 0;
+  const fillColor =
+    profile.fill_pct >= 95 ? "bg-teal-500" :
+    profile.fill_pct >= 75 ? "bg-amber-400" : "bg-red-400";
+
+  return (
+    <div className={cn(
+      "rounded-xl border bg-card overflow-hidden",
+      isNew ? "border-amber-300 dark:border-amber-700/50" : "border-border"
+    )}>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/20 transition-colors"
+      >
+        {/* Left: column info */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-sm">{profile.label}</span>
+            {isNew && (
+              <span className="text-[9px] bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400 px-1.5 py-0.5 rounded-full font-semibold">NEW</span>
+            )}
+            <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-semibold", TYPE_BADGE[profile.col_type] ?? "bg-muted/60 text-muted-foreground")}>
+              {profile.col_type}
+            </span>
+          </div>
+          <p className="text-[10px] font-mono text-muted-foreground/50">{profile.col_name}</p>
+          <div className="flex items-center gap-2">
+            <div className="w-24 h-1.5 rounded-full bg-muted/50 overflow-hidden flex-shrink-0">
+              <div className={cn("h-full rounded-full transition-all", fillColor)} style={{ width: `${profile.fill_pct}%` }} />
+            </div>
+            <span className="text-[11px] text-muted-foreground tabular-nums">
+              {profile.fill_pct}% filled · {profile.unique_count.toLocaleString()} unique
+              {profile.total > 0 && profile.null_count > 0 && (
+                <span className="text-muted-foreground/50"> · {profile.null_count.toLocaleString()} null</span>
+              )}
+            </span>
+          </div>
+        </div>
+
+        {/* Right: norm badge + chevron */}
+        <div className="flex items-center gap-2 shrink-0">
+          {hasNorms ? (
+            <span className="hidden sm:flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200/60 dark:bg-amber-900/20 dark:text-amber-400 dark:border-amber-800/30">
+              <AlertTriangle size={9} /> {profile.norm_total.toLocaleString()} to normalize
+            </span>
+          ) : (
+            <span className="hidden sm:flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 border border-teal-200/60 dark:bg-teal-900/20 dark:text-teal-400 dark:border-teal-800/30">
+              <CheckCircle2 size={9} /> Clean
+            </span>
+          )}
+          {expanded
+            ? <ChevronUp size={14} className="text-muted-foreground/40" />
+            : <ChevronDown size={14} className="text-muted-foreground/40" />}
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-border/40 px-4 py-3 bg-muted/10 space-y-3">
+          {/* Normalization plan */}
+          {profile.normalizations.length > 0 && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-2">Normalization Plan</p>
+              <div className="space-y-1.5">
+                {profile.normalizations.map((n, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[11px] leading-relaxed">
+                    <span className="text-amber-500 shrink-0 mt-px">▸</span>
+                    <span>
+                      <span className="font-bold tabular-nums text-amber-700 dark:text-amber-400">{n.count.toLocaleString()}×</span>{" "}
+                      <span className="text-muted-foreground">{n.label}</span>
+                      {n.examples.length > 0 && (
+                        <span className="text-muted-foreground/60">
+                          {" "}— e.g. {n.examples.map(e => `"${e}"`).join(", ")}
+                        </span>
+                      )}
+                      {"  "}<span className="font-mono text-xs text-teal-600 dark:text-teal-400 font-semibold">{n.action}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Range info */}
+          {(profile.num_min !== undefined || profile.date_min !== undefined) && (
+            <div className="text-[11px] text-muted-foreground">
+              <span className="font-semibold uppercase tracking-wide text-[10px] mr-2">Range</span>
+              {profile.num_min !== undefined && (
+                <span className="font-mono">
+                  {typeof profile.num_min === "number" ? profile.num_min.toLocaleString() : profile.num_min}
+                  {" → "}
+                  {typeof profile.num_max === "number" ? profile.num_max?.toLocaleString() : profile.num_max}
+                </span>
+              )}
+              {profile.date_min !== undefined && (
+                <span className="font-mono">{profile.date_min} → {profile.date_max}</span>
+              )}
+            </div>
+          )}
+
+          {/* Top values */}
+          {profile.top_values.length > 0 && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Top Values</p>
+              <div className="flex flex-wrap gap-1.5">
+                {profile.top_values.map((tv, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 text-[10px] bg-muted/50 px-2 py-0.5 rounded font-mono border border-border/30">
+                    <span className="max-w-[10rem] truncate">"{tv.value}"</span>
+                    <span className="text-muted-foreground/50 shrink-0">×{tv.count}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+ColumnProfileCard.displayName = "ColumnProfileCard";
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ImportPage() {
@@ -221,7 +380,26 @@ export default function ImportPage() {
   const [confirmResult, setConfirmResult]     = useState<ConfirmResult | null>(null);
   const [stagingPage, setStagingPage]         = useState(1);
 
+  // Sidebar & existing-dataset state
+  const [showInSidebar, setShowInSidebar]         = useState(true);
+  const [sidebarLabel, setSidebarLabel]           = useState("");
+  const [existingDatasets, setExistingDatasets]   = useState<ExistingDataset[]>([]);
+  const [selectedDatasetId, setSelectedDatasetId] = useState<number | null>(null);
+
+  // Profile expand/collapse state (Step 2)
+  const [expandedProfiles, setExpandedProfiles] = useState<Set<string>>(new Set());
+
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load existing datasets for "re-import" dropdown
+  useEffect(() => {
+    datasetsApi.list().then(res => {
+      if (res.success) {
+        const all = ((res.data as any).datasets ?? []) as ExistingDataset[];
+        setExistingDatasets(all);
+      }
+    }).catch(() => {});
+  }, []);
 
   const handleFile = useCallback((f: File | null) => {
     if (!f) return;
@@ -234,17 +412,22 @@ export default function ImportPage() {
   }, []);
 
   const handleUpload = useCallback(async () => {
-    if (!file || !datasetName.trim()) return;
+    if (!file) return;
+    const isExisting = selectedDatasetId !== null;
+    if (!isExisting && !datasetName.trim()) return;
     setUploading(true);
     try {
+      const effectiveLabel = sidebarLabel.trim() || datasetName.trim();
       const res = await importApi.upload(
         file,
-        datasetName.trim(),
-        undefined,
-        primaryKeyCol.trim() || undefined
+        isExisting ? "" : datasetName.trim(),
+        isExisting ? selectedDatasetId! : undefined,
+        isExisting ? undefined : (primaryKeyCol.trim() || undefined),
+        isExisting ? undefined : { show_in_sidebar: showInSidebar, page_label: effectiveLabel }
       );
       if (res.success) {
         setUploadResult(res.data as UploadResult);
+        if (!isExisting) invalidateSidebarCache();
         setStep(2);
       } else {
         toast.error(res.message || "Upload failed.");
@@ -254,7 +437,7 @@ export default function ImportPage() {
     } finally {
       setUploading(false);
     }
-  }, [file, datasetName, primaryKeyCol]);
+  }, [file, datasetName, primaryKeyCol, selectedDatasetId, showInSidebar, sidebarLabel]);
 
   const loadStagingRows = useCallback(async (
     batchId: number, page: number, status: typeof statusFilter
@@ -319,6 +502,7 @@ export default function ImportPage() {
     setStep(1); setDatasetName(""); setPrimaryKeyCol(""); setFile(null);
     setUploadResult(null); setSummary(null); setStagingRows([]); setStagingMeta(null);
     setConfirmResult(null); setStatusFilter("all"); setStagingPage(1);
+    setShowInSidebar(true); setSidebarLabel(""); setSelectedDatasetId(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
@@ -352,37 +536,114 @@ export default function ImportPage() {
         {step === 1 && (
           <div className="space-y-6">
             <div className="rounded-2xl border border-border bg-card p-6 space-y-5">
-              <div className="space-y-2">
-                <Label htmlFor="dataset-name" className="text-sm font-medium">
-                  Dataset Name <span className="text-red-500">*</span>
-                </Label>
-                <Input
-                  id="dataset-name"
-                  value={datasetName}
-                  onChange={e => setDatasetName(e.target.value)}
-                  placeholder="e.g. Closing Progress Q3 2026"
-                  className="max-w-md"
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  A new table <code className="font-mono text-[10px]">ds_{datasetName ? datasetName.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"") : "..."}</code> will be created.
-                </p>
-              </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="pk-col" className="text-sm font-medium">
-                  Primary Key Column <span className="text-muted-foreground font-normal">(optional)</span>
-                </Label>
-                <Input
-                  id="pk-col"
-                  value={primaryKeyCol}
-                  onChange={e => setPrimaryKeyCol(e.target.value)}
-                  placeholder="e.g. PDID or Site ID — used to detect duplicates on re-import"
-                  className="max-w-md"
-                />
-                <p className="text-[11px] text-muted-foreground">
-                  Leave blank to always insert new rows. Must match a column header in your file.
-                </p>
-              </div>
+              {/* ── Existing dataset selector ───────────────────────────────── */}
+              {existingDatasets.length > 0 && (
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">
+                    Re-import into existing page <span className="text-muted-foreground font-normal">(optional)</span>
+                  </Label>
+                  <select
+                    value={selectedDatasetId ?? ""}
+                    onChange={e => setSelectedDatasetId(e.target.value ? Number(e.target.value) : null)}
+                    className="max-w-md w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  >
+                    <option value="">— Create new dataset / page —</option>
+                    {existingDatasets.map(ds => (
+                      <option key={ds.id} value={ds.id}>
+                        {ds.page_label ? `${ds.page_label} (${ds.name})` : ds.name}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedDatasetId && (
+                    <p className="text-[11px] text-teal-600 dark:text-teal-400">
+                      New rows will be merged into this existing dataset.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── New dataset fields ─────────────────────────────────────── */}
+              {!selectedDatasetId && (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="dataset-name" className="text-sm font-medium">
+                      Dataset Name <span className="text-red-500">*</span>
+                    </Label>
+                    <Input
+                      id="dataset-name"
+                      value={datasetName}
+                      onChange={e => setDatasetName(e.target.value)}
+                      placeholder="e.g. Closing Progress Q3 2026"
+                      className="max-w-md"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      A new table <code className="font-mono text-[10px]">ds_{datasetName ? datasetName.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"") : "..."}</code> will be created.
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="pk-col" className="text-sm font-medium">
+                      Primary Key Column <span className="text-muted-foreground font-normal">(optional)</span>
+                    </Label>
+                    <Input
+                      id="pk-col"
+                      value={primaryKeyCol}
+                      onChange={e => setPrimaryKeyCol(e.target.value)}
+                      placeholder="e.g. PDID or Site ID — used to detect duplicates on re-import"
+                      className="max-w-md"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      Leave blank to always insert new rows. Must match a column header in your file.
+                    </p>
+                  </div>
+
+                  {/* ── Sidebar page settings ───────────────────────────────── */}
+                  <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Sidebar Page</p>
+
+                    {/* Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setShowInSidebar(v => !v)}
+                      className={cn(
+                        "flex items-center gap-2.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors border",
+                        showInSidebar
+                          ? "bg-teal-50 text-teal-700 border-teal-200 hover:bg-teal-100 dark:bg-teal-900/20 dark:text-teal-400 dark:border-teal-800/40"
+                          : "bg-muted/40 text-muted-foreground border-border/60 hover:bg-muted/70"
+                      )}
+                    >
+                      <span className={cn(
+                        "w-7 h-4 rounded-full transition-colors relative flex-shrink-0",
+                        showInSidebar ? "bg-teal-500" : "bg-muted-foreground/30"
+                      )}>
+                        <span className={cn(
+                          "absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all",
+                          showInSidebar ? "left-3.5" : "left-0.5"
+                        )} />
+                      </span>
+                      <PanelLeft size={13} />
+                      {showInSidebar ? "Show in sidebar navigation" : "Don't add to sidebar"}
+                    </button>
+
+                    {/* Label input */}
+                    {showInSidebar && (
+                      <div className="space-y-1.5 pl-1">
+                        <Label htmlFor="sidebar-label" className="text-xs text-muted-foreground">
+                          Sidebar Label <span className="font-normal">(leave blank to use dataset name)</span>
+                        </Label>
+                        <Input
+                          id="sidebar-label"
+                          value={sidebarLabel}
+                          onChange={e => setSidebarLabel(e.target.value)}
+                          placeholder={datasetName.trim() || "e.g. Sales Report 2026"}
+                          className="max-w-md h-8 text-sm"
+                        />
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
 
             {/* File drop zone */}
@@ -429,7 +690,7 @@ export default function ImportPage() {
 
             <Button
               onClick={handleUpload}
-              disabled={!file || !datasetName.trim() || uploading}
+              disabled={!file || (!selectedDatasetId && !datasetName.trim()) || uploading}
               className="w-full sm:w-auto"
             >
               {uploading ? <><Loader2 size={14} className="mr-2 animate-spin" /> Uploading…</> : <><ArrowRight size={14} className="mr-2" /> Upload & Detect Schema</>}
@@ -462,44 +723,96 @@ export default function ImportPage() {
               )}
             </div>
 
-            <div className="rounded-2xl border border-border bg-card overflow-hidden">
-              <div className="px-5 py-3 border-b border-border/50 flex items-center justify-between">
-                <p className="text-sm font-semibold">Detected Columns</p>
-                <p className="text-xs text-muted-foreground">{uploadResult.columns.length} columns</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-border/50 bg-muted/20">
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">#</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Header in File</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Column Name (DB)</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Inferred Type</th>
-                      <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Sample</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {uploadResult.columns.map((col, i) => {
-                      const sampleVal = uploadResult.preview_rows[0]?.[col.col_name] ?? "—";
-                      const isNew = uploadResult.new_columns.some(nc => nc.col_name === col.col_name);
-                      return (
-                        <tr key={col.col_name} className={cn("border-t border-border/30", isNew && "bg-amber-50/20 dark:bg-amber-950/10")}>
-                          <td className="px-4 py-2 text-muted-foreground/50 tabular-nums">{i + 1}</td>
-                          <td className="px-4 py-2 font-medium">{col.label} {isNew && <span className="ml-1 text-[9px] bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400 px-1.5 py-0.5 rounded-full font-semibold">NEW</span>}</td>
-                          <td className="px-4 py-2 font-mono text-[10px] text-muted-foreground">{col.col_name}</td>
-                          <td className="px-4 py-2">
-                            <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-semibold", TYPE_BADGE[col.col_type] ?? "bg-muted/60 text-muted-foreground")}>
-                              {col.col_type}
-                            </span>
-                          </td>
-                          <td className="px-4 py-2 max-w-[12rem] truncate text-muted-foreground">{sampleVal || "—"}</td>
-                        </tr>
+            {/* ── Column profiles (Data Analyst view) ───────────────────── */}
+            {uploadResult.column_profiles && uploadResult.column_profiles.length > 0 ? (
+              <div className="space-y-2">
+                {/* Summary header */}
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                  <div className="flex items-center gap-3">
+                    <p className="text-sm font-semibold">{uploadResult.column_profiles.length} columns detected</p>
+                    {(() => {
+                      const colsWithNorms = uploadResult.column_profiles!.filter(p => p.norm_total > 0);
+                      const totalNorms = uploadResult.column_profiles!.reduce((s, p) => s + p.norm_total, 0);
+                      return colsWithNorms.length > 0 ? (
+                        <span className="flex items-center gap-1 text-[11px] text-amber-700 dark:text-amber-400 font-medium">
+                          <AlertTriangle size={11} />
+                          {totalNorms.toLocaleString()} values across {colsWithNorms.length} column(s) will be normalized
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1 text-[11px] text-teal-600 dark:text-teal-400 font-medium">
+                          <CheckCircle2 size={11} /> All data looks clean
+                        </span>
                       );
+                    })()}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const all = uploadResult.column_profiles!.map(p => p.col_name);
+                      setExpandedProfiles(prev => prev.size > 0 ? new Set() : new Set(all));
+                    }}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {expandedProfiles.size > 0 ? "Collapse all" : "Expand all"}
+                  </button>
+                </div>
+
+                {uploadResult.column_profiles.map(profile => (
+                  <ColumnProfileCard
+                    key={profile.col_name}
+                    profile={profile}
+                    isNew={uploadResult.new_columns.some(nc => nc.col_name === profile.col_name)}
+                    expanded={expandedProfiles.has(profile.col_name)}
+                    onToggle={() => setExpandedProfiles(prev => {
+                      const next = new Set(prev);
+                      if (next.has(profile.col_name)) next.delete(profile.col_name);
+                      else next.add(profile.col_name);
+                      return next;
                     })}
-                  </tbody>
-                </table>
+                  />
+                ))}
               </div>
-            </div>
+            ) : (
+              /* Fallback: simple table when profiles not available */
+              <div className="rounded-2xl border border-border bg-card overflow-hidden">
+                <div className="px-5 py-3 border-b border-border/50 flex items-center justify-between">
+                  <p className="text-sm font-semibold">Detected Columns</p>
+                  <p className="text-xs text-muted-foreground">{uploadResult.columns.length} columns</p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-border/50 bg-muted/20">
+                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">#</th>
+                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Header in File</th>
+                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Column Name (DB)</th>
+                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Inferred Type</th>
+                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Sample</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {uploadResult.columns.map((col, i) => {
+                        const sampleVal = uploadResult.preview_rows[0]?.[col.col_name] ?? "—";
+                        const isNew = uploadResult.new_columns.some(nc => nc.col_name === col.col_name);
+                        return (
+                          <tr key={col.col_name} className={cn("border-t border-border/30", isNew && "bg-amber-50/20 dark:bg-amber-950/10")}>
+                            <td className="px-4 py-2 text-muted-foreground/50 tabular-nums">{i + 1}</td>
+                            <td className="px-4 py-2 font-medium">{col.label}{isNew && <span className="ml-1 text-[9px] bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400 px-1.5 py-0.5 rounded-full font-semibold">NEW</span>}</td>
+                            <td className="px-4 py-2 font-mono text-[10px] text-muted-foreground">{col.col_name}</td>
+                            <td className="px-4 py-2">
+                              <span className={cn("px-2 py-0.5 rounded-full text-[9px] font-semibold", TYPE_BADGE[col.col_type] ?? "bg-muted/60 text-muted-foreground")}>
+                                {col.col_type}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 max-w-[12rem] truncate text-muted-foreground">{sampleVal || "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             <div className="flex gap-3">
               <Button variant="outline" onClick={() => setStep(1)}>Back</Button>
@@ -538,8 +851,10 @@ export default function ImportPage() {
                   className="rounded"
                 />
                 <span className="text-sm">
-                  Include <strong className="text-amber-600 dark:text-amber-400">{summary.warning.toLocaleString()} warning</strong> rows in import
-                  <span className="block text-xs text-muted-foreground">Warnings = type coercion issues or duplicate key updates</span>
+                  Include <strong className="text-amber-600 dark:text-amber-400">{summary.warning.toLocaleString()} auto-cleaned</strong> rows in import
+                  <span className="block text-xs text-muted-foreground">
+                    These rows had values that were automatically normalized (e.g. Excel zero-dates → NULL, boolean flags → 1, placeholder dates → NULL). Check each row's detail to confirm the cleaning is correct.
+                  </span>
                 </span>
               </label>
             )}

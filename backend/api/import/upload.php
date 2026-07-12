@@ -42,6 +42,8 @@ if ($valError) jsonError($valError, 422);
 $datasetName   = trim($_POST['dataset_name']    ?? '');
 $datasetId     = (int)($_POST['dataset_id']     ?? 0);
 $primaryKeyCol = trim($_POST['primary_key_col'] ?? '');
+$showInSidebar = isset($_POST['show_in_sidebar']) ? (int)(bool)$_POST['show_in_sidebar'] : 1;
+$pageLabel     = trim($_POST['page_label']       ?? '');
 
 if ($datasetName === '' && $datasetId <= 0) {
     jsonError('dataset_name is required when creating a new dataset.', 400);
@@ -176,6 +178,41 @@ try {
             $admin['id'],
         ]);
         $datasetId = (int)$db->lastInsertId();
+
+        // Apply sidebar settings for new dataset (try/catch if migration not yet run)
+        try {
+            $db->prepare(
+                "UPDATE datasets SET show_in_sidebar=?, page_label=? WHERE id=?"
+            )->execute([$showInSidebar, $pageLabel !== '' ? $pageLabel : null, $datasetId]);
+        } catch (Throwable $inner) {
+            // Sidebar columns may not exist yet — ignore
+        }
+    }
+
+    // ── Data Analyst: profile every column across ALL rows ────────────────────
+    // Build a reverse map: col_name => column letter
+    $letterByColName = [];
+    foreach ($rawHeaders as $letter => $header) {
+        if ($header === '') continue;
+        $colName = $colNameMap[$letter] ?? null;
+        if ($colName !== null) $letterByColName[$colName] = $letter;
+    }
+
+    $columnProfiles = [];
+    foreach ($columnDefs as $colDef) {
+        $letter = $letterByColName[$colDef['col_name']] ?? null;
+        if ($letter === null) continue;
+        // Extract all raw values for this column letter across every row
+        $rawVals = [];
+        foreach ($parsedRows as $row) {
+            $rawVals[] = isset($row[$letter]) ? (string)$row[$letter] : '';
+        }
+        $columnProfiles[] = profileColumn(
+            $rawVals,
+            $colDef['col_type'],
+            $colDef['label'],
+            $colDef['col_name']
+        );
     }
 
     // ── Build column header → col_name map for staging (stored on batch) ─────
@@ -253,15 +290,16 @@ try {
     cleanupTempFile($tmpPath);
 
     jsonSuccess([
-        'batch_id'       => $batchId,
-        'file_name'      => $fileName,
-        'dataset_id'     => $datasetId,
-        'dataset_name'   => $datasetName,
-        'is_new_dataset' => $isNewDataset,
-        'total_rows'     => $totalRows,
-        'columns'        => $columnDefs,
-        'new_columns'    => $newColumns,
-        'preview_rows'   => $previewRows,
+        'batch_id'        => $batchId,
+        'file_name'       => $fileName,
+        'dataset_id'      => $datasetId,
+        'dataset_name'    => $datasetName,
+        'is_new_dataset'  => $isNewDataset,
+        'total_rows'      => $totalRows,
+        'columns'         => $columnDefs,
+        'new_columns'     => $newColumns,
+        'preview_rows'    => $previewRows,
+        'column_profiles' => $columnProfiles,
     ], 'File uploaded. Proceed to validation.');
 
 } catch (Throwable $e) {

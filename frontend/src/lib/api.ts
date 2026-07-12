@@ -106,12 +106,22 @@ export const projectsApi = projectApi;
 
 export const importApi = {
   /** Step 1 — Upload file; auto-infers schema + creates/extends ds_* table */
-  upload: async (file: File, datasetName: string, datasetId?: number, primaryKeyCol?: string) => {
+  upload: async (
+    file: File,
+    datasetName: string,
+    datasetId?: number,
+    primaryKeyCol?: string,
+    sidebarOptions?: { show_in_sidebar: boolean; page_label?: string }
+  ) => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("dataset_name", datasetName);
     if (datasetId) fd.append("dataset_id", String(datasetId));
     if (primaryKeyCol) fd.append("primary_key_col", primaryKeyCol);
+    if (sidebarOptions) {
+      fd.append("show_in_sidebar", sidebarOptions.show_in_sidebar ? "1" : "0");
+      if (sidebarOptions.page_label) fd.append("page_label", sidebarOptions.page_label);
+    }
     const res = await fetch(`${API_URL}/api/import/upload.php`, {
       method: "POST",
       credentials: "include",
@@ -267,6 +277,30 @@ export const datasetsApi = {
 
   query: (params: Record<string, string | number | undefined | null>) =>
     request(`/api/datasets/query.php?${buildQS(params)}`),
+
+  sidebarItems: () => request("/api/datasets/sidebar.php"),
+
+  updateSidebar: (id: number, data: {
+    show_in_sidebar: boolean;
+    page_label?: string | null;
+    sidebar_sort?: number;
+  }) =>
+    request("/api/datasets/update-sidebar.php", {
+      method: "POST",
+      body: JSON.stringify({ id, ...data }),
+    }),
+
+  updateRow: (datasetId: number, rowId: number, values: Record<string, unknown>) =>
+    request("/api/datasets/update-row.php", {
+      method: "POST",
+      body: JSON.stringify({ dataset_id: datasetId, row_id: rowId, values }),
+    }),
+
+  deleteRow: (datasetId: number, rowId: number) =>
+    request("/api/datasets/delete-row.php", {
+      method: "POST",
+      body: JSON.stringify({ dataset_id: datasetId, row_id: rowId }),
+    }),
 };
 
 // ─── Audit Logs ─────────────────────────────────────────────────────────────

@@ -30,16 +30,23 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AuthUser } from "@/types/user";
-import { authApi } from "@/lib/api";
+import { authApi, datasetsApi } from "@/lib/api";
 import { clearStoredUser } from "@/lib/auth";
 import { toast } from "sonner";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  SidebarDataset,
+  getCachedSidebarDatasets,
+  setCachedSidebarDatasets,
+  subscribeSidebarCache,
+} from "@/lib/sidebar-cache";
 
 interface NavItem {
   href: string;
   label: string;
   icon: React.ElementType;
   adminOnly?: boolean;
+  tourId?: string;
 }
 
 interface NavGroup {
@@ -47,48 +54,50 @@ interface NavGroup {
   items: NavItem[];
 }
 
-const navGroups: NavGroup[] = [
+// Static groups — Dataset group is built dynamically below
+const STATIC_BEFORE_DATASET: NavGroup[] = [
   {
     label: null,
     items: [
-      { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
+      { href: "/dashboard", label: "Overview", icon: LayoutDashboard, tourId: "nav-overview" },
     ],
   },
-  {
-    label: "Dataset",
-    items: [
-      { href: "/dashboard/closing", label: "Cloud TI Reeng Kal (Closing)", icon: CheckCircle2 },
-      { href: "/dashboard/filter900", label: "Cloud TI Reeng Kal (Filter)", icon: Filter },
-      { href: "/dashboard/refinement", label: "Cloud TI Reeng Kal (Refinement)", icon: Swords },
-    ],
-  },
+];
+
+const DATASET_LEGACY_ITEMS: NavItem[] = [
+  { href: "/dashboard/closing",    label: "Cloud TI Reeng Kal (Closing)",    icon: CheckCircle2 },
+  { href: "/dashboard/filter900",  label: "Cloud TI Reeng Kal (Filter)",     icon: Filter },
+  { href: "/dashboard/refinement", label: "Cloud TI Reeng Kal (Refinement)", icon: Swords },
+];
+
+const STATIC_AFTER_DATASET: NavGroup[] = [
   {
     label: "Analitik",
     items: [
-      { href: "/dashboard/analytics", label: "Chart Builder", icon: TrendingUp },
-      { href: "/dashboard/charts", label: "Dynamic Charts", icon: PieChart, adminOnly: true },
-      { href: "/dashboard/location", label: "Peta Lokasi", icon: MapPin },
-      { href: "/dashboard/acceptance", label: "Acceptance", icon: ClipboardCheck },
-      { href: "/dashboard/financial", label: "Financial", icon: DollarSign },
-      { href: "/dashboard/issues", label: "Issues", icon: AlertTriangle },
+      { href: "/dashboard/analytics",  label: "Chart Builder",   icon: TrendingUp },
+      { href: "/dashboard/charts",     label: "Dynamic Charts",  icon: PieChart,       adminOnly: true },
+      { href: "/dashboard/location",   label: "Peta Lokasi",     icon: MapPin },
+      { href: "/dashboard/acceptance", label: "Acceptance",      icon: ClipboardCheck },
+      { href: "/dashboard/financial",  label: "Financial",       icon: DollarSign },
+      { href: "/dashboard/issues",     label: "Issues",          icon: AlertTriangle },
     ],
   },
   {
     label: "Data",
     items: [
-      { href: "/dashboard/data", label: "Detail Data", icon: Table2 },
-      { href: "/dashboard/datasets", label: "Dynamic Datasets", icon: DatabaseZap, adminOnly: true },
-      { href: "/dashboard/import", label: "Import Data", icon: Upload, adminOnly: true },
-      { href: "/dashboard/manual-input", label: "Input Manual", icon: PenLine, adminOnly: true },
-      { href: "/dashboard/manage-columns", label: "Manage Columns", icon: Columns3, adminOnly: true },
+      { href: "/dashboard/data",         label: "Detail Data",      icon: Table2 },
+      { href: "/dashboard/datasets",     label: "Dynamic Datasets", icon: DatabaseZap, adminOnly: true, tourId: "nav-datasets" },
+      { href: "/dashboard/import",       label: "Import Data",      icon: Upload,      adminOnly: true, tourId: "nav-import" },
+      { href: "/dashboard/manual-input", label: "Input Manual",     icon: PenLine,     adminOnly: true },
+      { href: "/dashboard/manage-columns", label: "Manage Columns", icon: Columns3,    adminOnly: true },
     ],
   },
   {
     label: "Admin",
     items: [
-      { href: "/dashboard/users", label: "User Management", icon: Users, adminOnly: true },
-      { href: "/dashboard/audit-log", label: "Audit Log", icon: History, adminOnly: true },
-      { href: "/dashboard/settings", label: "Settings", icon: Settings, adminOnly: true },
+      { href: "/dashboard/users",     label: "User Management", icon: Users,    adminOnly: true },
+      { href: "/dashboard/audit-log", label: "Audit Log",       icon: History,  adminOnly: true },
+      { href: "/dashboard/settings",  label: "Settings",        icon: Settings, adminOnly: true },
     ],
   },
 ];
@@ -106,16 +115,70 @@ const ACTIVE_NAV_STYLE: React.CSSProperties = {
   color: "hsl(var(--sidebar-primary-foreground))",
 };
 
+const SIDEBAR_DATASET_LIMIT = 4;
+
 export function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [collapsed, setCollapsed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [pendingHref, setPendingHref] = useState<string | null>(null);
+  const [showAllDatasets, setShowAllDatasets] = useState(false);
+
+  // Dynamic sidebar datasets (module-level cache prevents API call on every navigation)
+  const [dynamicDatasets, setDynamicDatasets] = useState<SidebarDataset[]>(
+    () => getCachedSidebarDatasets() ?? []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchSidebar = () => {
+      const cached = getCachedSidebarDatasets();
+      if (cached !== null) {
+        if (!cancelled) setDynamicDatasets(cached);
+        return;
+      }
+      datasetsApi.sidebarItems().then((res) => {
+        if (cancelled) return;
+        if (res.success && Array.isArray(res.data)) {
+          const items = res.data as SidebarDataset[];
+          setCachedSidebarDatasets(items);
+          setDynamicDatasets(items);
+        }
+      }).catch(() => {});
+    };
+
+    fetchSidebar();
+    const unsub = subscribeSidebarCache(fetchSidebar);
+    return () => { cancelled = true; unsub(); };
+  }, []);
 
   useEffect(() => {
     setPendingHref(null);
   }, [pathname]);
+
+  const visibleDatasets = useMemo(
+    () => (showAllDatasets ? dynamicDatasets : dynamicDatasets.slice(0, SIDEBAR_DATASET_LIMIT)),
+    [dynamicDatasets, showAllDatasets]
+  );
+
+  const navGroups = useMemo<NavGroup[]>(() => {
+    const datasetDynamicItems: NavItem[] = visibleDatasets.map((ds) => ({
+      href: `/dashboard/datasets/${ds.id}`,
+      label: ds.page_label ?? ds.name,
+      icon: Table2,
+    }));
+
+    return [
+      ...STATIC_BEFORE_DATASET,
+      {
+        label: "Dataset",
+        items: [...datasetDynamicItems, ...DATASET_LEGACY_ITEMS],
+      },
+      ...STATIC_AFTER_DATASET,
+    ];
+  }, [visibleDatasets]);
 
   const handleNavigate = (href: string) => {
     if (href !== pathname) setPendingHref(href);
@@ -183,7 +246,11 @@ export function Sidebar({ user }: SidebarProps) {
             if (visibleItems.length === 0) return null;
 
             return (
-              <div key={gi} className={gi > 0 ? "mt-3" : ""}>
+              <div
+                key={gi}
+                className={gi > 0 ? "mt-3" : ""}
+                data-tour={group.label === "Dataset" ? "nav-dataset-group" : undefined}
+              >
                 {group.label && !collapsed && (
                   <p className="px-4 pb-1 text-[10px] font-semibold uppercase text-sidebar-foreground/45">
                     {group.label}
@@ -201,6 +268,7 @@ export function Sidebar({ user }: SidebarProps) {
                         key={item.href}
                         href={item.href}
                         prefetch
+                        data-tour={item.tourId}
                         aria-current={active ? "page" : undefined}
                         aria-busy={pending || undefined}
                         onClick={() => handleNavigate(item.href)}
@@ -222,6 +290,17 @@ export function Sidebar({ user }: SidebarProps) {
                     );
                   })}
                 </div>
+                {!collapsed && group.label === "Dataset" && dynamicDatasets.length > SIDEBAR_DATASET_LIMIT && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllDatasets((v) => !v)}
+                    className="mt-0.5 flex w-full items-center gap-2 rounded-md px-4 py-1.5 text-xs text-sidebar-foreground/50 transition-colors hover:text-sidebar-foreground/80"
+                  >
+                    {showAllDatasets
+                      ? "Sembunyikan"
+                      : `Lihat ${dynamicDatasets.length - SIDEBAR_DATASET_LIMIT} dataset lainnya`}
+                  </button>
+                )}
               </div>
             );
           })}
@@ -266,5 +345,3 @@ export function Sidebar({ user }: SidebarProps) {
     </>
   );
 }
-
-

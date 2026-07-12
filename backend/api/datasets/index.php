@@ -19,13 +19,26 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 requireAdmin();
 
 try {
-    $db   = getDB();
-    $rows = $db->query(
-        "SELECT id, name, slug, table_name, columns_schema, primary_key_col,
-                row_count, created_by, created_at, updated_at
-           FROM datasets
-          ORDER BY created_at DESC"
-    )->fetchAll(PDO::FETCH_ASSOC);
+    $db = getDB();
+
+    // Fallback if sidebar columns haven't been migrated yet
+    try {
+        $rows = $db->query(
+            "SELECT id, name, slug, table_name, columns_schema, primary_key_col,
+                    page_label, show_in_sidebar, sidebar_sort,
+                    row_count, created_by, created_at, updated_at
+               FROM datasets
+              ORDER BY created_at DESC"
+        )->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $inner) {
+        $rows = $db->query(
+            "SELECT id, name, slug, table_name, columns_schema, primary_key_col,
+                    NULL AS page_label, 0 AS show_in_sidebar, 100 AS sidebar_sort,
+                    row_count, created_by, created_at, updated_at
+               FROM datasets
+              ORDER BY created_at DESC"
+        )->fetchAll(PDO::FETCH_ASSOC);
+    }
 
     $datasets = [];
     foreach ($rows as $row) {
@@ -36,6 +49,9 @@ try {
             'slug'            => $row['slug'],
             'table_name'      => $row['table_name'],
             'primary_key_col' => $row['primary_key_col'],
+            'page_label'      => $row['page_label'],
+            'show_in_sidebar' => (bool)$row['show_in_sidebar'],
+            'sidebar_sort'    => (int)$row['sidebar_sort'],
             'column_count'    => count($schema),
             'row_count'       => (int)$row['row_count'],
             'created_at'      => $row['created_at'],
