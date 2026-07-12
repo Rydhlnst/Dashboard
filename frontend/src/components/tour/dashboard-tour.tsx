@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, createContext, useContext } from "react";
 import dynamic from "next/dynamic";
 import type { CallBackProps, Step } from "react-joyride";
-import { STATUS, EVENTS, ACTIONS } from "react-joyride";
+import { STATUS } from "react-joyride";
 
 // react-joyride uses DOM APIs — load client-side only
 // Explicitly extract .default to avoid [object Module] error in Next.js 16
@@ -103,8 +103,18 @@ export function useTour(): TourContextValue {
 export function DashboardTourProvider({ children }: { children: React.ReactNode }) {
   const [enabled, setEnabledState] = useState(true);
   const [running, setRunning]      = useState(false);
-  const [stepIndex, setStepIndex]  = useState(0);
+  const [runKey, setRunKey]        = useState(0);
   const [mounted, setMounted]      = useState(false);
+  const [activeSteps, setActiveSteps] = useState<Step[]>(STEPS);
+
+  const resolveSteps = useCallback(() => {
+    const filtered = STEPS.filter(s => {
+      const t = s.target;
+      if (typeof t !== "string" || t === "body") return true;
+      return !!document.querySelector(t);
+    });
+    setActiveSteps(filtered.length ? filtered : STEPS.slice(0, 1));
+  }, []);
 
   useEffect(() => {
     setMounted(true);
@@ -116,7 +126,7 @@ export function DashboardTourProvider({ children }: { children: React.ReactNode 
       const completed = localStorage.getItem(LS_COMPLETED_KEY) === "1";
       if (isEnabled && !completed) {
         // Small delay to let the sidebar/topbar render before targeting them
-        setTimeout(() => { setStepIndex(0); setRunning(true); }, 800);
+        setTimeout(() => { resolveSteps(); setRunKey(k => k + 1); setRunning(true); }, 800);
       }
     } catch { /* noop */ }
   }, []);
@@ -128,25 +138,25 @@ export function DashboardTourProvider({ children }: { children: React.ReactNode 
   }, []);
 
   const start = useCallback(() => {
-    setStepIndex(0);
-    setRunning(true);
+    setRunning(false);
+    resolveSteps();
+    setRunKey(k => k + 1);
     try { localStorage.removeItem(LS_COMPLETED_KEY); } catch {}
-  }, []);
+    setTimeout(() => setRunning(true), 50);
+  }, [resolveSteps]);
 
   const stop = useCallback(() => setRunning(false), []);
 
   const handleCallback = useCallback((data: CallBackProps) => {
-    const { status, type, index, action } = data;
-
-    if (type === EVENTS.STEP_AFTER || type === EVENTS.TARGET_NOT_FOUND) {
-      const nextIndex = index + (action === ACTIONS.PREV ? -1 : 1);
-      if (nextIndex < 0 || nextIndex >= STEPS.length) {
-        setRunning(false);
-        try { localStorage.setItem(LS_COMPLETED_KEY, "1"); } catch {}
-      } else {
-        setStepIndex(nextIndex);
-      }
-    } else if (status === STATUS.FINISHED || status === STATUS.SKIPPED) {
+    const { status, type, action } = data as CallBackProps & { type?: string; action?: string };
+    const done =
+      status === STATUS.FINISHED ||
+      status === STATUS.SKIPPED ||
+      type === "tour:end" ||
+      action === "close" ||
+      action === "skip" ||
+      action === "reset";
+    if (done) {
       setRunning(false);
       try { localStorage.setItem(LS_COMPLETED_KEY, "1"); } catch {}
     }
@@ -157,16 +167,16 @@ export function DashboardTourProvider({ children }: { children: React.ReactNode 
       {children}
       {mounted && (
         <Joyride
-          steps={STEPS}
+          key={runKey}
+          steps={activeSteps}
           run={running}
-          stepIndex={stepIndex}
           continuous
           showProgress
           showSkipButton
           disableScrolling={false}
           scrollToFirstStep
           spotlightClicks
-          callback={handleCallback}
+          onEvent={handleCallback as any}
           locale={{
             back: "Kembali",
             close: "Tutup",
