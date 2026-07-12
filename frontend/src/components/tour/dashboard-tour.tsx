@@ -6,7 +6,11 @@ import type { CallBackProps, Step } from "react-joyride";
 import { STATUS, EVENTS, ACTIONS } from "react-joyride";
 
 // react-joyride uses DOM APIs — load client-side only
-const Joyride = dynamic(() => import("react-joyride"), { ssr: false });
+// Explicitly extract .default to avoid [object Module] error in Next.js 16
+const Joyride = dynamic(
+  () => import("react-joyride").then((mod) => ({ default: mod.default })),
+  { ssr: false }
+);
 
 const LS_ENABLED_KEY   = "dashboardTour.enabled";
 const LS_COMPLETED_KEY = "dashboardTour.completed";
