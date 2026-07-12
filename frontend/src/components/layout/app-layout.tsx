@@ -24,29 +24,23 @@ interface AppLayoutProps {
 }
 
 export function AppLayout({ children, title, adminOnly = false }: AppLayoutProps) {
-  // Initialize directly from cache/localStorage so there is no spinner flash
-  // on navigations where the user is already authenticated.
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    if (typeof window === "undefined") return null;
-    if (isCacheValid() && meCache) return meCache.user;
-    return getStoredUser();
-  });
-  const [loading, setLoading] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
-    if (isCacheValid() && meCache) return false;
-    return getStoredUser() === null; // only show spinner when there is truly no user
-  });
+  // Always start with null/true so server and client render the same initial
+  // state — avoids React hydration mismatch (#418 / #406).
+  // localStorage is read inside useEffect (client-only).
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+
   const router = useRouter();
 
   useEffect(() => {
-    const stored = getStoredUser();
-
-    // Cache valid — no network call needed, just ensure state is current
+    // Now we are on the client — read localStorage / cache
     if (isCacheValid() && meCache) {
       setUser(meCache.user);
       setLoading(false);
       return;
     }
+
+    const stored = getStoredUser();
 
     if (stored) {
       // Show page immediately with stored data while we verify in background
