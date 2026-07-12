@@ -99,15 +99,17 @@ export function AppLayout({ children, title, adminOnly = false }: AppLayoutProps
   if (adminOnly && !isAdmin(user.role)) return null;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-muted/30">
-      <Sidebar user={user} />
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <Topbar user={user} title={title} />
-        <main className="flex-1 overflow-y-auto p-4 md:p-6">
-          {children}
-        </main>
+    <DashboardTourProvider>
+      <div className="flex h-screen overflow-hidden bg-muted/30">
+        <Sidebar user={user} />
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <Topbar user={user} title={title} />
+          <main className="flex-1 overflow-y-auto p-4 md:p-6">
+            {children}
+          </main>
+        </div>
       </div>
-    </div>
+    </DashboardTourProvider>
   );
 }
 
