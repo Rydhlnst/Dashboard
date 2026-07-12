@@ -13,7 +13,7 @@ import dynamic from "next/dynamic";
 
 // Dynamic import of Leaflet Map component to prevent Next.js SSR window is not defined errors
 const MapComponent = dynamic(
-  () => import("@/components/location/map-component"),
+  () => import("@/components/location/map-component").then((mod) => ({ default: mod.default })),
   {
     ssr: false,
     loading: () => (
@@ -24,6 +24,7 @@ const MapComponent = dynamic(
     ),
   }
 );
+
 
 interface FilterOptions {
   provinces: string[];
