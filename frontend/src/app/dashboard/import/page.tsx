@@ -2,6 +2,8 @@
 
 import { useState, useCallback, useRef, memo, useEffect } from "react";
 import { AppLayout } from "@/components/layout/app-layout";
+import { PageTour } from "@/components/tour/page-tour";
+import type { Step } from "react-joyride";
 import { importApi, datasetsApi } from "@/lib/api";
 import { invalidateSidebarCache } from "@/lib/sidebar-cache";
 import { Button } from "@/components/ui/button";
@@ -99,6 +101,49 @@ interface ConfirmResult {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STEP_LABELS = ["Dataset & File", "Column Preview", "Validating", "Review", "Done"];
+
+const IMPORT_TOUR_STEPS: Step[] = [
+  {
+    target: 'body',
+    placement: "center",
+    title: "Panduan Import Data",
+    content:
+      "Halaman ini memandu upload file CSV/Excel dalam 5 langkah: pilih dataset → upload → review kolom → validasi → konfirmasi. Ikuti tour singkat berikut.",
+    disableBeacon: true,
+  },
+  {
+    target: '[data-tour="import-dataset-selector"]',
+    title: "1. Pilih Mode",
+    content:
+      "Pilih dataset yang sudah ada di dropdown ini untuk MENGGANTI sumber datanya (re-import). Kosongkan untuk membuat dataset baru.",
+    disableBeacon: true,
+    placement: "bottom",
+  },
+  {
+    target: '[data-tour="import-new-fields"]',
+    title: "Konfigurasi Dataset Baru",
+    content:
+      "Isi nama dataset, primary key (kolom untuk deteksi duplikat saat re-import), dan opsi sidebar. Field ini otomatis tersembunyi jika Anda memilih re-import ke dataset existing.",
+    disableBeacon: true,
+    placement: "top",
+  },
+  {
+    target: '[data-tour="import-dropzone"]',
+    title: "2. Upload File",
+    content:
+      "Drag & drop file CSV/XLSX ke sini, atau klik untuk browse. Sistem otomatis mendeteksi kolom, tipe data (DATE, DECIMAL, VARCHAR), dan format.",
+    disableBeacon: true,
+    placement: "top",
+  },
+  {
+    target: '[data-tour="import-upload-btn"]',
+    title: "3. Deteksi Schema",
+    content:
+      "Klik tombol ini untuk upload file. Kolom & tipe data akan otomatis dianalisis, dan Anda akan diarahkan ke halaman review.",
+    disableBeacon: true,
+    placement: "top",
+  },
+];
 
 const STATUS_BADGE: Record<RowStatus, string> = {
   valid:    "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300",
@@ -393,10 +438,17 @@ export default function ImportPage() {
 
   // Load existing datasets for "re-import" dropdown
   useEffect(() => {
+    const prefillDatasetId =
+      typeof window !== "undefined"
+        ? Number(new URLSearchParams(window.location.search).get("dataset_id") ?? 0) || null
+        : null;
     datasetsApi.list().then(res => {
       if (res.success) {
         const all = ((res.data as any).datasets ?? []) as ExistingDataset[];
         setExistingDatasets(all);
+        if (prefillDatasetId && all.some(d => d.id === prefillDatasetId)) {
+          setSelectedDatasetId(prefillDatasetId);
+        }
       }
     }).catch(() => {});
   }, []);
@@ -523,11 +575,14 @@ export default function ImportPage() {
   return (
     <AppLayout>
       <div className="max-w-4xl mx-auto px-4 py-8">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold">Import Data</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Upload any Excel or CSV file — schema is auto-detected and a dedicated table is created.
-          </p>
+        <div className="mb-6 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold">Import Data</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Upload any Excel or CSV file — schema is auto-detected and a dedicated table is created.
+            </p>
+          </div>
+          <PageTour storageKey="tour.import.v1" steps={IMPORT_TOUR_STEPS} />
         </div>
 
         <StepBar current={step} />
@@ -539,7 +594,7 @@ export default function ImportPage() {
 
               {/* ── Existing dataset selector ───────────────────────────────── */}
               {existingDatasets.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-2" data-tour="import-dataset-selector">
                   <Label className="text-sm font-medium">
                     Re-import into existing page <span className="text-muted-foreground font-normal">(optional)</span>
                   </Label>
@@ -566,7 +621,7 @@ export default function ImportPage() {
               {/* ── New dataset fields ─────────────────────────────────────── */}
               {!selectedDatasetId && (
                 <>
-                  <div className="space-y-2">
+                  <div className="space-y-2" data-tour="import-new-fields">
                     <Label htmlFor="dataset-name" className="text-sm font-medium">
                       Dataset Name <span className="text-red-500">*</span>
                     </Label>
@@ -648,6 +703,7 @@ export default function ImportPage() {
 
             {/* File drop zone */}
             <div
+              data-tour="import-dropzone"
               className={cn(
                 "rounded-2xl border-2 border-dashed transition-colors p-10 text-center cursor-pointer",
                 dragOver ? "border-teal-400 bg-teal-50/10" : "border-border hover:border-teal-400/50"
@@ -689,6 +745,7 @@ export default function ImportPage() {
             </div>
 
             <Button
+              data-tour="import-upload-btn"
               onClick={handleUpload}
               disabled={!file || (!selectedDatasetId && !datasetName.trim()) || uploading}
               className="w-full sm:w-auto"

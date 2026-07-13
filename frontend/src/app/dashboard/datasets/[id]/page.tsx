@@ -18,11 +18,57 @@ import { toast } from "sonner";
 import {
   Loader2, Search, ChevronLeft, ChevronRight, DatabaseZap,
   ArrowLeft, Pencil, Trash2, Save, BarChart2, Table2, Plus, RefreshCw,
+  Download, FileSpreadsheet, Upload,
 } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { DynamicChart } from "@/components/charts/dynamic-chart";
 import { ChartType } from "@/types/chart";
+import { PageTour } from "@/components/tour/page-tour";
+import type { Step } from "react-joyride";
+
+const DATASET_TOUR_STEPS: Step[] = [
+  {
+    target: "body",
+    placement: "center",
+    title: "Panduan Halaman Dataset",
+    content:
+      "Halaman ini menampilkan seluruh data dataset Anda, dengan tab untuk melihat/edit data serta membuat chart khusus.",
+    disableBeacon: true,
+  },
+  {
+    target: '[data-tour="dataset-tabs"]',
+    title: "Tab Data & Charts",
+    content:
+      "Tab Data untuk melihat & edit baris. Tab Charts untuk membuat visualisasi khusus dataset ini (bar, line, pie, dll).",
+    disableBeacon: true,
+    placement: "bottom",
+  },
+  {
+    target: '[data-tour="dataset-export"]',
+    title: "Export CSV / Excel",
+    content:
+      "Export seluruh data yang sedang tampil (mengikuti filter search) ke CSV atau Excel. Format tanggal & angka sudah disesuaikan dengan file sumber.",
+    disableBeacon: true,
+    placement: "bottom",
+  },
+  {
+    target: '[data-tour="dataset-reimport"]',
+    title: "Rubah Sumber Data",
+    content:
+      "Klik di sini untuk mengganti/memperbarui data dataset ini dari file baru. Kolom yang tidak ada di file baru akan tetap dipertahankan; kolom baru otomatis ditambahkan.",
+    disableBeacon: true,
+    placement: "bottom",
+  },
+  {
+    target: '[data-tour="row-actions"]',
+    title: "Edit / Hapus Baris",
+    content:
+      "Klik ikon pensil untuk edit baris (semua kolom bisa diubah), atau ikon tempat sampah untuk hapus.",
+    disableBeacon: true,
+    placement: "left",
+  },
+];
 
 interface ColDef { col_name: string; col_type: string; label: string }
 
@@ -607,6 +653,33 @@ function DataTab({
         <Button size="sm" variant="ghost" className="h-8 px-2 gap-1" onClick={() => load(page, search, sortCol, sortDir)}>
           <RefreshCw size={13} />
         </Button>
+
+        <div className="flex items-center gap-2" data-tour="dataset-export">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => window.open(datasetsApi.csvUrl(datasetId, search || undefined), "_blank")}
+          >
+            <Download size={13} />
+            CSV
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => window.open(datasetsApi.excelUrl(datasetId, search || undefined), "_blank")}
+          >
+            <FileSpreadsheet size={13} />
+            Excel
+          </Button>
+          <Link href={`/dashboard/import?dataset_id=${datasetId}`} data-tour="dataset-reimport">
+            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+              <Upload size={13} />
+              Re-import source
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Table */}
@@ -795,6 +868,9 @@ export default function DatasetDetailPage() {
               </div>
             </>
           )}
+          <div className="ml-auto">
+            <PageTour storageKey="tour.dataset-detail.v1" steps={DATASET_TOUR_STEPS} />
+          </div>
         </div>
 
         <Tabs value={tab} onValueChange={(v) => setTab(v as "data" | "charts")}>

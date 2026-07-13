@@ -229,11 +229,27 @@ function whitelistType(string $type): string
  */
 function createDatasetTable(PDO $db, string $tableName, array $columns): void
 {
+    // Estimate row size and promote VARCHAR → TEXT if we'd blow MySQL's 65535-byte row limit.
+    // utf8mb4 → 4 bytes per char + 2 length bytes. TEXT contributes ~12 bytes (off-page pointer).
+    $rowBudget = 60000;   // leave 5KB headroom for meta cols + overhead
+    $estimated = 0;
+    foreach ($columns as $col) {
+        $t = strtoupper(trim($col['col_type']));
+        if (preg_match('/^VARCHAR\((\d+)\)$/', $t, $m)) $estimated += ((int)$m[1] * 4 + 2);
+        elseif ($t === 'DECIMAL(18,4)')                $estimated += 9;
+        elseif (in_array($t, ['DATE','SMALLINT UNSIGNED'], true)) $estimated += 3;
+        elseif (in_array($t, ['INT UNSIGNED','DATETIME'], true))  $estimated += 5;
+        elseif ($t === 'BIGINT UNSIGNED')              $estimated += 8;
+        else                                           $estimated += 12; // TEXT-ish
+    }
+    $promoteToText = $estimated > $rowBudget;
+
     $defs = [];
     foreach ($columns as $col) {
         $safe = sanitizeColName($col['col_name']);
         if ($safe === '') continue;
         $type = whitelistType($col['col_type']);
+        if ($promoteToText && strpos($type, 'VARCHAR') === 0) $type = 'TEXT';
         $defs[] = "  `{$safe}` {$type} DEFAULT NULL";
     }
 
@@ -245,7 +261,7 @@ function createDatasetTable(PDO $db, string $tableName, array $columns): void
          . $colDefs
          . "  PRIMARY KEY (`_id`),\n"
          . "  KEY `idx_batch` (`_batch_id`)\n"
-         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci";
+         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC";
     $db->exec($sql);
 }
 

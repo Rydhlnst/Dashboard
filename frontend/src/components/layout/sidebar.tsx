@@ -11,9 +11,6 @@ import {
   LogOut,
   ChevronLeft,
   ChevronRight,
-  CheckCircle2,
-  Filter,
-  Swords,
   PenLine,
   Columns3,
   History,
@@ -62,12 +59,6 @@ const STATIC_BEFORE_DATASET: NavGroup[] = [
       { href: "/dashboard", label: "Overview", icon: LayoutDashboard, tourId: "nav-overview" },
     ],
   },
-];
-
-const DATASET_LEGACY_ITEMS: NavItem[] = [
-  { href: "/dashboard/closing",    label: "Cloud TI Reeng Kal (Closing)",    icon: CheckCircle2 },
-  { href: "/dashboard/filter900",  label: "Cloud TI Reeng Kal (Filter)",     icon: Filter },
-  { href: "/dashboard/refinement", label: "Cloud TI Reeng Kal (Refinement)", icon: Swords },
 ];
 
 const STATIC_AFTER_DATASET: NavGroup[] = [
@@ -174,7 +165,7 @@ export function Sidebar({ user }: SidebarProps) {
       ...STATIC_BEFORE_DATASET,
       {
         label: "Dataset",
-        items: [...datasetDynamicItems, ...DATASET_LEGACY_ITEMS],
+        items: datasetDynamicItems,
       },
       ...STATIC_AFTER_DATASET,
     ];

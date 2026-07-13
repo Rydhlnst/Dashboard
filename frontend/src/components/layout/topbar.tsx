@@ -10,12 +10,20 @@ interface TopbarProps {
 }
 
 export function Topbar({ user, title }: TopbarProps) {
+  const sectionLabel = title || "Dashboard";
+
   return (
-    <header className="relative flex h-14 shrink-0 items-center justify-between border-b bg-background px-4 md:px-6">
-      <h1 className="text-base font-semibold tracking-tight text-foreground">
-        {title || "Dashboard"}
-      </h1>
-      <div className="flex items-center gap-3">
+    <header className="border-b bg-background px-4 py-3 md:px-6">
+      <div className="flex items-center justify-end gap-3">
+        <div className="hidden min-w-0 flex-1 lg:block">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+            {user.role.replace("_", " ")}
+          </p>
+          <p className="truncate text-sm font-semibold tracking-tight text-foreground/90">
+            {sectionLabel}
+          </p>
+        </div>
+
         <TourToggle />
         <button
           type="button"

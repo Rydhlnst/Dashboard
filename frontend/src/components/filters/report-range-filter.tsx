@@ -58,7 +58,7 @@ export function ReportRangeFilter({ value, onChange, className }: ReportRangeFil
   return (
     <div className={cn("rounded-xl border border-border bg-card p-3 shadow-sm", className)}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex min-w-0 flex-wrap gap-1.5">
           {PERIODS.map((period) => {
             const Icon = period.icon;
             const active = value.report_period === period.value;
@@ -81,23 +81,23 @@ export function ReportRangeFilter({ value, onChange, className }: ReportRangeFil
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            From
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:flex lg:flex-wrap lg:items-center">
+          <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground sm:min-w-[180px] lg:min-w-0 lg:flex-row lg:items-center lg:gap-2">
+            <span className="shrink-0">From</span>
             <input
               type="date"
               value={value.date_from}
               onChange={(event) => updateDate("date_from", event.target.value)}
-              className="h-9 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs text-foreground"
             />
           </label>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            To
+          <label className="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground sm:min-w-[180px] lg:min-w-0 lg:flex-row lg:items-center lg:gap-2">
+            <span className="shrink-0">To</span>
             <input
               type="date"
               value={value.date_to}
               onChange={(event) => updateDate("date_to", event.target.value)}
-              className="h-9 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-2 text-xs text-foreground"
             />
           </label>
         </div>

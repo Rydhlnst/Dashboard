@@ -301,6 +301,16 @@ export const datasetsApi = {
       method: "POST",
       body: JSON.stringify({ dataset_id: datasetId, row_id: rowId }),
     }),
+
+  csvUrl: (datasetId: number, search?: string): string => {
+    const qs = buildQS({ dataset_id: datasetId, search });
+    return `${API_URL}/api/datasets/export-csv.php${qs ? `?${qs}` : ""}`;
+  },
+
+  excelUrl: (datasetId: number, search?: string): string => {
+    const qs = buildQS({ dataset_id: datasetId, search });
+    return `${API_URL}/api/datasets/export-excel.php${qs ? `?${qs}` : ""}`;
+  },
 };
 
 // ─── Audit Logs ─────────────────────────────────────────────────────────────
