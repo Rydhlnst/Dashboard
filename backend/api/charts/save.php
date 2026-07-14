@@ -50,7 +50,7 @@ if ($datasetId <= 0) jsonError('dataset_id is required.', 400);
 if ($xCol === '')    jsonError('x_col is required.', 400);
 
 $allowedAgg   = ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN'];
-$allowedTypes = ['bar', 'line', 'area', 'pie', 'donut', 'radar', 'radial', 'scatter'];
+$allowedTypes = ['bar', 'line', 'area', 'pie', 'donut', 'radar', 'radial', 'scatter', 'scurve'];
 $allowedSort  = ['value_desc', 'value_asc', 'label_asc', 'label_desc'];
 
 if (!in_array($yAgg, $allowedAgg, true))       jsonError('Invalid y_agg.', 400);

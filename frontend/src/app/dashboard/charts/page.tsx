@@ -76,6 +76,7 @@ const BUILDER_CHART_TYPES: { value: ChartType; label: string }[] = [
   { value: "pie",    label: "Pie" },
   { value: "donut",  label: "Donut" },
   { value: "radial", label: "H-Bar" },
+  { value: "scurve", label: "S-Curve" },
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 import {
   BarChart, Bar, LineChart, Line, AreaChart, Area,
   PieChart, Pie, Cell, RadarChart, Radar, PolarGrid, PolarAngleAxis,
-  ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ScatterChart, Scatter, ComposedChart, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
 } from "recharts";
 import { ChartData, ChartType } from "@/types/chart";
@@ -108,6 +108,28 @@ export function DynamicChart({ data, chartType, height = 300 }: DynamicChartProp
           </ScatterChart>
         </ResponsiveContainer>
       );
+
+    case "scurve": {
+      let cum = 0;
+      const scurveData = chartData.map((d) => {
+        cum += Number(d.value) || 0;
+        return { name: d.name, value: d.value, cumulative: cum };
+      });
+      return (
+        <ResponsiveContainer width="100%" height={height}>
+          <ComposedChart data={scurveData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="name" tick={{ fontSize: 11 }} angle={-30} textAnchor="end" height={60} />
+            <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+            <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            <Bar yAxisId="left" dataKey="value" name="Per Period" fill={COLORS[0] + "99"} radius={[4, 4, 0, 0]} />
+            <Line yAxisId="right" type="monotone" dataKey="cumulative" name="Cumulative" stroke={COLORS[3]} strokeWidth={2} dot={{ r: 3 }} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      );
+    }
 
     case "radial":
       // Radial: displayed as horizontal bar for simplicity

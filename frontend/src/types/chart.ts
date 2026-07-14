@@ -6,7 +6,8 @@ export type ChartType =
   | "donut"
   | "radar"
   | "radial"
-  | "scatter";
+  | "scatter"
+  | "scurve";
 
 export interface ChartDataItem {
   label: string;
@@ -39,6 +40,7 @@ export const CHART_TYPES: { value: ChartType; label: string }[] = [
   { value: "radar", label: "Radar Chart" },
   { value: "radial", label: "Radial Chart" },
   { value: "scatter", label: "Scatter Chart" },
+  { value: "scurve", label: "S-Curve" },
 ];
 
 export const GROUP_BY_OPTIONS = [
