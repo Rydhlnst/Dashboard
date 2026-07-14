@@ -180,6 +180,9 @@ export const analyticsApi = {
 
   charts: (params: Record<string, string | number | undefined> = {}) =>
     request(`/api/analytics/charts.php?${buildQS(params)}`),
+
+  datasetSummary: (datasetId: number) =>
+    request(`/api/analytics/dataset-summary.php?dataset_id=${datasetId}`),
 };
 
 export const chartsApi = {
