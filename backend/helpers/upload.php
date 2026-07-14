@@ -21,7 +21,7 @@ function validateExcelUpload(array $file): ?string {
     }
     $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
     if (!in_array($ext, ALLOWED_EXCEL_EXT, true)) {
-        return 'Only .xlsx and .xls files are allowed.';
+        return 'Only .xlsx, .xls, and .csv files are allowed.';
     }
     return null;
 }

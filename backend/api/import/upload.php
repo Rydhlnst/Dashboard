@@ -86,10 +86,11 @@ try {
     $headerIndexed = array_values($rawHeaders);         // 0-indexed
     $colNameMap    = buildColumnMap($headerIndexed);    // col_letter => col_name|null
 
-    // Collect up to 100 sample values per column for type inference
+    // Collect ALL values per column for type inference (no row cap).
+    // Capping the sample causes silent misinference when late rows introduce
+    // codes/refs not seen in the first N rows (e.g. PoNo like "3988/TC.03/…").
     $samples = [];
-    $sampleLimit = min(100, count($parsedRows));
-    foreach (array_slice($parsedRows, 0, $sampleLimit) as $row) {
+    foreach ($parsedRows as $row) {
         foreach ($rawHeaders as $letter => $header) {
             if ($header === '') continue;
             $samples[$letter][] = $row[$letter] ?? '';

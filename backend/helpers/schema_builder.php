@@ -170,11 +170,22 @@ function inferColType(array $samples): string
         $stripped = trim($stripped);
 
         if ($stripped !== '' && is_numeric($stripped)) {
-            $numHits++;
-            if (strpos($stripped, '.') !== false) $decHits++;
+            // Preserve identifiers with leading zeros (e.g. CID "0101663875",
+            // phone numbers, account numbers) — casting to float would drop the
+            // leading zero and corrupt the value.
+            if (strlen($stripped) > 1 && $stripped[0] === '0' && strpos($stripped, '.') === false) {
+                $hasStructuredCode = true;
+            } else {
+                $numHits++;
+                if (strpos($stripped, '.') !== false) $decHits++;
+            }
         } elseif (preg_match('/[A-Za-z]/', $stripped) && preg_match('/\d/', $stripped)) {
             // Value has both letters and digits and is not a date/currency
             // → likely a reference/code column (e.g. PO numbers like "0365/TC.03/EN-01")
+            $hasStructuredCode = true;
+        } elseif (preg_match('#[/\-]#', $v) && preg_match('/\d/', $v) && !looksLikeDate($v)) {
+            // Slashes/dashes with digits but not a date → structured reference
+            // (e.g. "4781/TC.03/EN-01/VII/2025")
             $hasStructuredCode = true;
         }
 
